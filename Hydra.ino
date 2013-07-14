@@ -66,6 +66,8 @@ Copyright 2013 Nicholas W. Sayer
 // The hydra won't operate properly if it can't divide the incoming power in half.
 #define MINIMUM_CURRENT 12
 
+#define ROLLING_AVERAGE_SIZE 100
+
 #define VERSION "0.1 alpha"
 
 
@@ -118,7 +120,23 @@ unsigned int MAtoPwm(unsigned int milliamps) {
   return (int)out;
 }
 
-#define ROLLING_AVERAGE_SIZE 10
+// Turn a millamp value into nn.n as amps, with the tenth rounded near.
+char *formatMilliamps(int milliamps) {
+  static char out[6];
+  
+  int hundredths = (milliamps / 10) % 100;
+  int tenths = hundredths / 10 + (((hundredths % 10) >= 5)?1:0);
+  int units = milliamps / 1000;
+  if (tenths >= 10) {
+    tenths -= 10;
+    units++;
+  }
+  
+  sprintf(out, "%2d.%01dA", units, tenths);
+  
+  return out;
+  
+}
 
 int high_micros;
 unsigned int rollingIncomingAverageMA[ROLLING_AVERAGE_SIZE];
@@ -166,14 +184,14 @@ void setup() {
 void error(int car) {
   m_Lcd.setBacklight(RED);
   if (car==CAR_A) {
-    digitalWrite(CAR_A_RELAY, LOW); // make sure the power is off
+    setRelay(CAR_A, LOW); // make sure the power is off
     setPilot(CAR_A, HIGH);
     m_Lcd.setCursor(0, 1);
     m_Lcd.print("A: ERR  ");
     last_car_a_state = STATE_E;
   } 
   else {
-    digitalWrite(CAR_B_RELAY, LOW); // make sure the power is off
+    setRelay(CAR_B, LOW); // make sure the power is off
     setPilot(CAR_B, HIGH);
     m_Lcd.setCursor(9, 1);
     m_Lcd.print("B: ERR  ");
@@ -276,14 +294,14 @@ void loop() {
 
   m_Lcd.setCursor(0, 0);
   char buf[17];
-  if (incomingPilotMilliamps < MINIMUM_CURRENT * 1000 || (micros() - lastInputPilotChange) > LOST_PILOT_GRACE_PERIOD) {
+  if (incomingPilotMilliamps < MINIMUM_CURRENT * 1000 || (micros() - lastPilotChange) > LOST_PILOT_GRACE_PERIOD) {
     m_Lcd.print("INPUT PILOT ERR ");
     error(CAR_A);
     error(CAR_B);
     return;
   }
-  sprintf(buf, "Input Pwr %2d.%02dA", incomingPilotMilliamps / 1000, (incomingPilotMilliamps / 10) % 100);
-  m_Lcd.print(buf);
+  m_Lcd.print("Input Pwr ");
+  m_Lcd.print(formatMilliamps(incomingPilotMilliamps));
 
   // Adjust the pilot levels to follow any changes in the incoming pilot
   if (last_car_a_state != STATE_A && last_car_a_state != STATE_E) {
@@ -430,9 +448,8 @@ void loop() {
       }
     }
     m_Lcd.setCursor(0, 1);
-    char buf[9];
-    sprintf(buf, "A:%2d.%02dA ", car_a_draw/1000, (car_a_draw/10)%100);
-    m_Lcd.print(buf);
+    m_Lcd.print("A:");
+    m_Lcd.print(formatMilliamps(car_a_draw));
   } 
   else {
     car_b_overdraw_begin = 0;
@@ -456,9 +473,8 @@ void loop() {
       }
     }
     m_Lcd.setCursor(9, 1);
-    char buf[9];
-    sprintf(buf, "B:%2d.%02dA ", car_b_draw/1000, (car_b_draw/10)%100);
-    m_Lcd.print(buf);
+    m_Lcd.print("B:");
+    m_Lcd.print(formatMilliamps(car_b_draw));
   } 
   else {
     car_b_overdraw_begin = 0;
