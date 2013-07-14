@@ -26,10 +26,10 @@ Copyright 2013 Nicholas W. Sayer
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
 
 // ---------- DIGITAL PINS ----------
-#define INCOMING_PILOT_PIN  2
+#define INCOMING_PILOT_PIN    2
 #define INCOMING_PILOT_INT      0       // Watch out. Pin 2 and interrupt 0 are tied together...
 
-#define CAR_A_PILOT_PIN		5	// output for toggling pilot on car A
+#define CAR_A_PILOT_PIN		10	// output for toggling pilot on car A
 #define CAR_B_PILOT_PIN		9	// output for toggling pilot on car B
 
 #define CAR_A_RELAY            7
@@ -75,15 +75,15 @@ LiquidTWI2 m_Lcd(LCD_I2C_ADDR, 1);
 int timeToMA(int msecHigh, int msecLow) {
   // First, normalize the frequency to 1000 Hz.
   // msec is the number of msec out of 1000 that the signal stayed high
-  int msec = (msecHigh * 1000) / (msecHigh + msecLow);
+  long msec = ((long)(msecHigh) * 1000) / (msecHigh + msecLow);
   if (msec < 100) {
     return 0;
   } 
   else if (msec < 850) {
-    return (msec) * 60;
+    return (int)((msec) * 60);
   } 
   else if (msec <= 960) {
-    return (msec - 640) * 250;
+    return (int)((msec - 640) * 250);
   } 
   else {
     return 0;
@@ -93,7 +93,7 @@ int timeToMA(int msecHigh, int msecLow) {
 
 // Convert a milliamp allowance into an outgoing pilot duty cycle.
 // In lieu of floating point, this is microseconds high out of 1000.
-int MAToMsec(int milliamps) {
+unsigned int MAToMsec(unsigned int milliamps) {
   if (milliamps < 6000) {
     return 9999; // illegal - set pilot to "high"
   } 
@@ -108,18 +108,21 @@ int MAToMsec(int milliamps) {
   }
 }
 
-int MAtoPwm(int milliamps) {
+unsigned int MAtoPwm(unsigned int milliamps) {
   long out = MAToMsec(milliamps);
+
   if (out >= 1000) return 255; // full on
   
-  out =  (out * 255) / 1000;  
-  
+  out =  (out * 256) / 1000;  
+
   return (int)out;
 }
 
+#define ROLLING_AVERAGE_SIZE 10
+
 int high_micros;
-int rollingIncomingAverageMA[10];
-int incomingPilotMilliamps;
+unsigned int rollingIncomingAverageMA[ROLLING_AVERAGE_SIZE];
+unsigned int incomingPilotMilliamps;
 int last_car_a_state=DUNNO, last_car_b_state=DUNNO;
 unsigned long car_a_overdraw_begin, car_b_overdraw_begin, car_a_request_time, car_b_request_time, lastPilotChange;
 
@@ -136,7 +139,7 @@ void setup() {
   digitalWrite(CAR_A_PILOT_PIN, HIGH);
   digitalWrite(CAR_B_PILOT_PIN, HIGH);
   digitalWrite(CAR_A_RELAY, LOW);
-  digitalWrite(CAR_A_RELAY, LOW);
+  digitalWrite(CAR_B_RELAY, LOW);
 
   attachInterrupt(INCOMING_PILOT_INT, handlePilotChange, CHANGE);
   
@@ -151,37 +154,45 @@ void setup() {
   if (!success) m_Lcd.setBacklight(YELLOW);
   success = SetPinFrequency(CAR_B_PILOT_PIN, 1000);
   if (!success) m_Lcd.setBacklight(BLUE);
+  
   // Enter state A on both cars
   setPilot(CAR_A, HIGH);
   setPilot(CAR_B, HIGH);
-  
+
   delay(1000); // meanwhile, the hope is that the incoming pilot rolling average will fill in...
-  
-  // XXX FIXME
-  incomingPilotMilliamps = 30000;
+  m_Lcd.clear();
 }
 
 void error(int car) {
   m_Lcd.setBacklight(RED);
   if (car==CAR_A) {
     digitalWrite(CAR_A_RELAY, LOW); // make sure the power is off
+    setPilot(CAR_A, HIGH);
     m_Lcd.setCursor(0, 1);
     m_Lcd.print("A: ERR  ");
+    last_car_a_state = STATE_E;
   } 
   else {
-    digitalWrite(CAR_A_RELAY, LOW); // make sure the power is off
+    digitalWrite(CAR_B_RELAY, LOW); // make sure the power is off
+    setPilot(CAR_B, HIGH);
     m_Lcd.setCursor(9, 1);
     m_Lcd.print("B: ERR  ");
+    last_car_b_state = STATE_E;
   }
-  // XXX FIXME
 }
+
+int relay_state_a, relay_state_b;
 
 void setRelay(int car, int state) {
   digitalWrite(car==CAR_A?CAR_A_RELAY:CAR_B_RELAY, state);
+  if (car==CAR_A) relay_state_a = state;
+  else
+  relay_state_b = state;
 }
 
 boolean isCarCharging(int car) {
-  return digitalRead(car==CAR_A?CAR_A_RELAY:CAR_B_RELAY)==HIGH;
+  return car==CAR_A?relay_state_a:relay_state_b;
+  //return digitalRead(car==CAR_A?CAR_A_RELAY:CAR_B_RELAY)==HIGH;
 }
 
 void setPilot(int car, int which) {
@@ -194,10 +205,10 @@ void setPilot(int car, int which) {
   }
 }
 
-int checkState(int car_pin) {
+int checkState(int car) {
   // Check the pilot state pin for the given car. If the voltage is > 0, then return which state the car is indicating.
   // If the voltage is < 0, then return either DUNNO (diode check pass) or STATE_E if the diode check fails.
-  return car_pin == CAR_A?STATE_B:STATE_C; // XXX FIXME
+  return car == CAR_B?STATE_C:STATE_B; // XXX FIXME
 }
 
 int readCurrent(int car_pin) {
@@ -205,14 +216,14 @@ int readCurrent(int car_pin) {
   return 0; // XXX FIXME
 }
 
-void reportIncomingPilot(int milliamps) {
-  int sum = milliamps;
-  for(int i = sizeof(rollingIncomingAverageMA) - 1; i > 1; i--) {
+void reportIncomingPilot(unsigned int milliamps) {
+  long sum = milliamps;
+  for(int i = ROLLING_AVERAGE_SIZE - 1; i >= 1; i--) {
     rollingIncomingAverageMA[i] = rollingIncomingAverageMA[i - 1];
     sum += rollingIncomingAverageMA[i];
   }
   rollingIncomingAverageMA[0] = milliamps;
-  incomingPilotMilliamps = sum / sizeof(rollingIncomingAverageMA);
+  incomingPilotMilliamps = (int)(sum / ROLLING_AVERAGE_SIZE);
   // Clamp to the maximum allowable current
   if (incomingPilotMilliamps > MAXIMUM_CURRENT * 1000) incomingPilotMilliamps = MAXIMUM_CURRENT * 1000;
 }
@@ -235,7 +246,7 @@ void handlePilotChange() {
 
   int pilotState = digitalRead(INCOMING_PILOT_PIN);
   if (pilotState == HIGH) {
-    int milliamps = timeToMA(high_micros, delta);
+    unsigned int milliamps = timeToMA(high_micros, delta);
     reportIncomingPilot(milliamps);
   } 
   else {
@@ -265,7 +276,7 @@ void loop() {
 
   m_Lcd.setCursor(0, 0);
   char buf[17];
-  if (incomingPilotMilliamps < MINIMUM_CURRENT /* || (micros() - lastInputPilotChange) > LOST_PILOT_GRACE_PERIOD */) {
+  if (incomingPilotMilliamps < MINIMUM_CURRENT * 1000 || (micros() - lastInputPilotChange) > LOST_PILOT_GRACE_PERIOD) {
     m_Lcd.print("INPUT PILOT ERR ");
     error(CAR_A);
     error(CAR_B);
@@ -283,7 +294,7 @@ void loop() {
   }
 
   // Check the pilot sense on each car.
-  int car_a_state = checkState(CAR_A_PILOT_SENSE);
+  int car_a_state = checkState(CAR_A);
   if (last_car_a_state == STATE_E && car_a_state == STATE_A) {
     // we were in error, but the car's been disconnected.
     // Finesse that by clearing the error state. The following logic
@@ -342,7 +353,7 @@ void loop() {
     }
   }
 
-  int car_b_state = checkState(CAR_B_PILOT_SENSE);
+  int car_b_state = checkState(CAR_B);
   if (last_car_b_state == STATE_E && car_b_state == STATE_A) {
     // we were in error, but the car's been disconnected.
     // Finesse that by clearing the error state. The following logic
@@ -376,7 +387,7 @@ void loop() {
       if (isCarCharging(CAR_A)) {
         // if car A is charging, we must transition them.
         car_b_request_time = millis();
-        // Drop car B down to 50%
+        // Drop car A down to 50%
         setPilot(CAR_A, HALF);
       } 
       else {
