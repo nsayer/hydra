@@ -47,6 +47,14 @@ If the incoming pilot either stops oscillating at 1 kHz, or if its duty cycle go
 current, then both cars will be errored out with an incoming pilot error. The minimum power is 12A, because
 the hydra must be able to divide that power by half, and 6A is the minimum allowable power per the J1772 spec.
 
+HARDWARE
+--------
+
+The boards can be ordered from OSHPark at http://oshpark.com/profiles/nsayer
+
+There are two DigiKey BOM files that you can use to buy all the parts to build a Hydra. That, and the
+Eagle .sch and .brd files and a PDF schematic are available in the project downloads.
+
 REVISION HISTORY
 ----------------
 
