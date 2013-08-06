@@ -60,3 +60,5 @@ REVISION HISTORY
 
 0.1 alpha - initial commit. This version is not yet actually functional, as the hardware has not yet been
 completely built.
+
+0.8 beta - This version has been tested with the prototype hardware (except the ammeters) and is fully functional.
