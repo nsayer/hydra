@@ -93,6 +93,10 @@
 // the pilot, so we'll go with that.
 #define OVERDRAW_GRACE_PERIOD 5000
 
+// This is how much "slop" we allow a car to have in terms of keeping under its current allowance.
+// That is, this value (in milliamps) plus the calculated current limit is what we enforce
+#define OVERDRAW_GRACE_AMPS 500
+
 // The time between withdrawing the pilot from a car and disconnecting its relay (in milliseconds).
 #define ERROR_DELAY 250
 
@@ -124,7 +128,7 @@
 
 // This is the number of duty cycle or ammeter samples we keep to make a rolling average to stabilize
 // the display. The balance here is between stability and responsiveness,
-#define ROLLING_AVERAGE_SIZE 50
+#define ROLLING_AVERAGE_SIZE 0
 
 // The number of milliseconds to sample an ammeter pin in order to find the two AC peaks.
 // one cycle at 60 Hz is 16.6 ms.
@@ -161,7 +165,7 @@
 // Te = 1983, MAX = 75, Rb=43
 // #define CURRENT_SCALE_FACTOR=80
 
-#define VERSION "0.8 beta"
+#define VERSION "0.8.1 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -304,9 +308,13 @@ void setRelay(unsigned int car, unsigned int state) {
   }
 }
 
+inline boolean isCarReallyCharging(unsigned int car) {
+  return (car == CAR_A)?relay_state_a:relay_state_b;
+}
+
 // If the car has requested charging and is in the transition delay, or if its
 // relay is actually on, then it's charging.
-boolean isCarCharging(unsigned int car) {
+inline boolean isCarCharging(unsigned int car) {
   switch(car) {
     case CAR_A:
       if (car_a_request_time != 0) return HIGH;
@@ -342,10 +350,9 @@ void setPilot(unsigned int car, unsigned int which) {
 
 int checkState(unsigned int car) {
   // poll the pilot state pin for 10 ms (should be 10 pilot cycles), looking for the low and high.
-  unsigned long now = millis();
   unsigned int low = 9999, high = 0;
   unsigned int car_pin = (car == CAR_A) ? CAR_A_PILOT_SENSE_PIN : CAR_B_PILOT_SENSE_PIN;
-  while(millis() - now < STATE_CHECK_INTERVAL) {
+  for(unsigned long now = millis(); millis() - now < STATE_CHECK_INTERVAL; ) {
     unsigned int val = analogRead(car_pin);
     if (val > high) high = val;
     if (val < low) low = val;
@@ -370,10 +377,9 @@ int checkState(unsigned int car) {
 }
 
 unsigned long readCurrent(unsigned int car) {
-  unsigned long now = millis();
   unsigned int positive_peak = 0, negative_peak=9999;
   unsigned int car_pin = (car == CAR_A) ? CAR_A_CURRENT_PIN : CAR_B_CURRENT_PIN;
-  while(millis() - now < CURRENT_SAMPLE_INTERVAL) {
+  for(unsigned long now = millis(); millis() - now < CURRENT_SAMPLE_INTERVAL; ) {
     unsigned int sample = analogRead(car_pin);
     if (sample > positive_peak) positive_peak = sample;
     if (sample < negative_peak) negative_peak = sample;
@@ -383,7 +389,10 @@ unsigned long readCurrent(unsigned int car) {
   return rollRollingAverage((car == CAR_A) ? car_a_current_samples : car_b_current_samples, delta * CURRENT_SCALE_FACTOR);
 }
 
-unsigned long rollRollingAverage(unsigned long *array, unsigned long new_value) {
+unsigned long rollRollingAverage(unsigned long array[], unsigned long new_value) {
+#if ROLLING_AVERAGE_SIZE == 0
+  return new_value;
+#else
   unsigned long sum = new_value;
   for(int i = ROLLING_AVERAGE_SIZE - 1; i >= 1; i--) {
     array[i] = array[i - 1];
@@ -391,9 +400,10 @@ unsigned long rollRollingAverage(unsigned long *array, unsigned long new_value) 
   }
   array[0] = new_value;
   return (sum / ROLLING_AVERAGE_SIZE);
+#endif
 }
 
-void reportIncomingPilot(unsigned long milliamps) {
+inline void reportIncomingPilot(unsigned long milliamps) {
 
   milliamps = rollRollingAverage(rollingIncomingAverageMA, milliamps);
   // Clamp to the maximum allowable current
@@ -469,6 +479,7 @@ void setup() {
   for(int i = 0; i < ROLLING_AVERAGE_SIZE; i++) {
     pollIncomingPilot();
   }
+  delay(2500); // let the splash screen show
   display.clear();
 }
 
@@ -670,13 +681,13 @@ void loop() {
   // attempt to reduce it to half power (and the other car has not yet
   // been turned on), so we must error them out before letting the other
   // car start.
-  if (isCarCharging(CAR_A)) {
+  if (isCarReallyCharging(CAR_A)) {
     int car_a_draw = readCurrent(CAR_A);
 
     // If the other car is charging, then we can only have half power
     int car_a_limit = incomingPilotMilliamps / (isCarCharging(CAR_B) ? 2 : 1);
 
-    if (car_a_draw > car_a_limit) {
+    if (car_a_draw > car_a_limit + OVERDRAW_GRACE_AMPS) {
       // car A has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
       if (car_a_overdraw_begin == 0) {
         car_a_overdraw_begin = millis();
@@ -702,13 +713,13 @@ void loop() {
     memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
   }
 
-  if (isCarCharging(CAR_B)) {
+  if (isCarReallyCharging(CAR_B)) {
     int car_b_draw = readCurrent(CAR_B);
 
     // If the other car is charging, then we can only have half power
     int car_b_limit = incomingPilotMilliamps / (isCarCharging(CAR_A) ? 2 : 1);
 
-    if (car_b_draw > car_b_limit) {
+    if (car_b_draw > car_b_limit + OVERDRAW_GRACE_AMPS) {
       // car B has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
       if (car_b_overdraw_begin == 0) {
         car_b_overdraw_begin = millis();
