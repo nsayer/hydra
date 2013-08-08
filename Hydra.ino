@@ -1,4 +1,3 @@
-
 /*
 
  J1772 Hydra for Arduino
@@ -26,17 +25,17 @@
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
 
 // ---------- DIGITAL PINS ----------
-#define INCOMING_PILOT_PIN 2
+#define INCOMING_PILOT_PIN      2
 #define INCOMING_PILOT_INT      0
 
 #define INCOMING_PROXIMITY_PIN  3
 #define INCOMING_PROXIMITY_INT  1
 
-#define CAR_A_PILOT_OUT_PIN		9	// output for toggling pilot on car A
-#define CAR_B_PILOT_OUT_PIN		10	// output for toggling pilot on car B
+#define CAR_A_PILOT_OUT_PIN     9 // output for toggling pilot on car A
+#define CAR_B_PILOT_OUT_PIN     10	// output for toggling pilot on car B
 
-#define CAR_A_RELAY            7
-#define CAR_B_RELAY            8
+#define CAR_A_RELAY             7
+#define CAR_B_RELAY             8
 
 // ---------- ANALOG PINS ----------
 // Note that in hardware version 0.6
@@ -89,13 +88,12 @@
 #define PILOT_DIODE_MAX  244
 
 // This is how long we allow a car to draw more current than it is allowed before we
-// error it out (in milliseconds). The spec says we must allow 5 seconds when changing
-// the pilot, so we'll go with that.
-#define OVERDRAW_GRACE_PERIOD 5000
+// error it out (in milliseconds).
+#define OVERDRAW_GRACE_PERIOD 2000
 
 // This is how much "slop" we allow a car to have in terms of keeping under its current allowance.
-// That is, this value (in milliamps) plus the calculated current limit is what we enforce
-#define OVERDRAW_GRACE_AMPS 500
+// That is, this value (in milliamps) plus the calculated current limit is what we enforce.
+#define OVERDRAW_GRACE_AMPS 2500
 
 // The time between withdrawing the pilot from a car and disconnecting its relay (in milliseconds).
 #define ERROR_DELAY 250
@@ -103,7 +101,7 @@
 // When a car requests state C while the other car is already in state C, we delay them for
 // this long while the other car transitions to half power. THIS INTERVAL MUST BE LONGER
 // THAN THE OVERDRAW_GRACE_PERIOD! (in milliseconds)
-#define TRANSITION_DELAY 6000
+#define TRANSITION_DELAY 3000
 
 // This is the current limit (in milliamps) of all of the components on the inlet side of the hydra -
 // the inlet itself, any fuses, and the wiring to the common sides of the relays.
@@ -116,6 +114,9 @@
 // This can not be lower than 12, because the J1772 spec bottoms out at 6A.
 // The hydra won't operate properly if it can't divide the incoming power in half. (in milliamps)
 #define MINIMUM_INLET_CURRENT 12000
+
+// This is the amount of current (in milliamps) we subtract from the inlet before apportioning it to the cars.
+#define INLET_CURRENT_DERATE 0
 
 // Amount of time, in milliseconds, we will analyse the duty cycle of the incoming pilot
 // Default is 500 cycles. We're doing a digitalRead(), so this will be thousands of samples.
@@ -131,8 +132,8 @@
 #define ROLLING_AVERAGE_SIZE 0
 
 // The number of milliseconds to sample an ammeter pin in order to find the two AC peaks.
-// one cycle at 60 Hz is 16.6 ms.
-#define CURRENT_SAMPLE_INTERVAL 17
+// one cycle at 50 Hz is 20 ms.
+#define CURRENT_SAMPLE_INTERVAL 21
 
 // This multiplier is the number of milliamps RMS per A/d converter unit, peak-to-peak
 
@@ -165,7 +166,7 @@
 // Te = 1983, MAX = 75, Rb=43
 // #define CURRENT_SCALE_FACTOR=80
 
-#define VERSION "0.8.1 beta"
+#define VERSION "0.8.2 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -409,6 +410,8 @@ inline void reportIncomingPilot(unsigned long milliamps) {
   // Clamp to the maximum allowable current
   if (milliamps > MAXIMUM_INLET_CURRENT) milliamps = MAXIMUM_INLET_CURRENT;
   
+  milliamps -= INLET_CURRENT_DERATE;
+    
   incomingPilotMilliamps = milliamps;
 }
 
@@ -759,7 +762,6 @@ void loop() {
     display.print("B: ON   ");
   }
 }
-
 
 
 
