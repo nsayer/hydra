@@ -131,42 +131,28 @@
 // the display. The balance here is between stability and responsiveness,
 #define ROLLING_AVERAGE_SIZE 0
 
-// The number of milliseconds to sample an ammeter pin in order to find the two AC peaks.
-// one cycle at 50 Hz is 20 ms.
-#define CURRENT_SAMPLE_INTERVAL 21
+// The maximum number of milliseconds to sample an ammeter pin in order to find five zero-crossings.
+// two and a half cycles at 50 Hz is 50 ms.
+#define CURRENT_SAMPLE_INTERVAL 55
 
-// This multiplier is the number of milliamps RMS per A/d converter unit, peak-to-peak
+// This multiplier is the number of milliamps per A/d converter unit.
 
-// To calculate this multiplier, you need to know the ratio between the RMS current and P-P volts across
-// the burden resistor. You need to pick the burden resistor so that the maximum outlet RMS current is slightly
-// below 5 volts p-p (2.5 volts peak amplitude, or 1.77 volts RMS).
+// First, you need to select the burden resistor for the CT. You choose the largest value possible such that
+// the maximum peak-to-peak voltage for the current range is 5 volts. To obtain this value, divide the maximum
+// outlet current by the Te. That value is the maximum CT current RMS. You must convert that to P-P, so multiply
+// by 2*sqrt(2). Divide 5 by that value and select the next lower standard resistor value. For the reference
+// design, Te is 1018 and the outlet maximum is 30. 5/((30/1018)*2*sqrt(2)) = 59.995, so a 56 ohm resistor
+// is called for. Call this value Rb (burden resistor).
 
-// The CT has a specification called Te, or "Turns Equivalent." In short, this is the ratio of the current
-// through the measured conductor and the current that you see output on the two leads of the CT. You place a
-// burden resistor across the CT to turn the measured current of the CT into a measured voltage, which the
-// controller's A/d converters can sample. Since we're measuring an AC current, we will want to get a peak-to-peak
-// measurement, so the way to do that is to offset the measured voltage by half of our 5 volt measuring range.
-// That means that we want to select our burden resistor value so that 5 volts is slightly higher than the
-// expected voltage for your MAXIMUM_OUTLET_CURRENT. To figure this out, take your maximum current, call it A,
-// and convert it to a peak-to-peak value by multiplying it by 2*sqrt(2), then divide that by the Te value of
-// your coil. Divide 5 by that value and then take the next lower standard resistor value. That will be Rb.
-// The standard CT in the parts list for the Hydra has a Te of 1018. For a 30A value of MAXIMUM_OUTLET_CURRENT,
-// That means Rb is 56.
+// Next, one must use Te and Rb to determine the volts-per-amp value. Note that the readCurrent()
+// method calculates the RMS value before the scaling factor, so RMS need not be taken into account.
+// (1 / Te) * Rb = Rb / Te = Volts per Amp. For the reference design, that's 55.009 mV.
 
-// Having done that, you calculate milliamps-per-volt-P-t-P with 1000 / ((sqrt(2) * 2 / Te) * Rb), where Te
-// is the "turns equivalent" of the CT and Rb is the value of the burden resistor. Once you know that,
-// the scale factor is mApV * (5/1024)
+// Each count of the A/d converter is 4.882 mV (5/1024). V/A divided by V/unit is unit/A. For the reference
+// design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get...
+#define CURRENT_SCALE_FACTOR 88.7625558
 
-// Te = 1018, MAX = 30, Rb=56
-#define CURRENT_SCALE_FACTOR 31
-
-// Te = 1018, MAX = 50, Rb=33
-// #define CURRENT_SCALE_FACTOR=53
-
-// Te = 1983, MAX = 75, Rb=43
-// #define CURRENT_SCALE_FACTOR=80
-
-#define VERSION "0.8.2 beta"
+#define VERSION "0.9 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -378,16 +364,35 @@ int checkState(unsigned int car) {
 }
 
 unsigned long readCurrent(unsigned int car) {
-  unsigned int positive_peak = 0, negative_peak=9999;
   unsigned int car_pin = (car == CAR_A) ? CAR_A_CURRENT_PIN : CAR_B_CURRENT_PIN;
-  for(unsigned long now = millis(); millis() - now < CURRENT_SAMPLE_INTERVAL; ) {
-    unsigned int sample = analogRead(car_pin);
-    if (sample > positive_peak) positive_peak = sample;
-    if (sample < negative_peak) negative_peak = sample;
+  unsigned long sum = 0;
+  unsigned int zero_crossings = 0;
+  long last_sample = 9999;
+  unsigned int sample_count = 0;
+  for(unsigned long start = millis(); millis() - start < CURRENT_SAMPLE_INTERVAL; ) {
+    long sample = analogRead(car_pin);
+    // If this isn't the first sample, and if the sign of the value differs from the
+    // sign of the previous value, then count that as a zero crossing.
+    if (last_sample != 9999 && ((last_sample > 512) != (sample > 512))) zero_crossings++;
+    last_sample = sample;
+    switch(zero_crossings) {
+       case 0: continue; // Still waiting to start sampling
+       case 1:
+       case 2:
+       case 3:
+       case 4:
+           // Gather the sum-of-the-squares and count how many samples we've collected.
+           sum += (unsigned long)((sample - 512) * (sample - 512));
+           sample_count++;
+           continue;
+       case 5:
+           // The answer is the square root of the mean of the squares.
+           // But additionally, that value must be scaled to a real current value.
+           return (unsigned long)(sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR);
+    }
   }
-  unsigned long delta = positive_peak - negative_peak;
-
-  return rollRollingAverage((car == CAR_A) ? car_a_current_samples : car_b_current_samples, delta * CURRENT_SCALE_FACTOR);
+  // ran out of time. Assume that it's simply not oscillating any. 
+  return 0;
 }
 
 unsigned long rollRollingAverage(unsigned long array[], unsigned long new_value) {
