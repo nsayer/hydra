@@ -162,7 +162,7 @@
 // design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get...
 #define CURRENT_SCALE_FACTOR 88.7625558
 
-#define VERSION "0.9.1 beta"
+#define VERSION "0.9.2 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -507,7 +507,7 @@ void setup() {
   
   // Display the splash screen for 2 seconds total. We spent some time above sampling the
   // pilot, so don't include that.
-  delay(2000 - (ROLLING_AVERAGE_SIZE * STATE_CHECK_INTERVAL)); // let the splash screen show
+  delay(2000 - (ROLLING_AVERAGE_SIZE * PILOT_POLL_INTERVAL)); // let the splash screen show
   display.clear();
 }
 
