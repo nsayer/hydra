@@ -88,20 +88,26 @@
 #define PILOT_DIODE_MAX  244
 
 // This is how long we allow a car to draw more current than it is allowed before we
-// error it out (in milliseconds).
-#define OVERDRAW_GRACE_PERIOD 2000
+// error it out (in milliseconds). The spec says that a car is supposed to have 5000
+// msec to respond to a pilot reduction, but it also says that we must respond to a
+// state C transition within 5000 ms, so something has to give.
+#define OVERDRAW_GRACE_PERIOD 4000
 
 // This is how much "slop" we allow a car to have in terms of keeping under its current allowance.
 // That is, this value (in milliamps) plus the calculated current limit is what we enforce.
-#define OVERDRAW_GRACE_AMPS 2500
+#define OVERDRAW_GRACE_AMPS 500
 
 // The time between withdrawing the pilot from a car and disconnecting its relay (in milliseconds).
-#define ERROR_DELAY 250
+// The spec says that this must be no shorter than 3000 ms, but the problem with that is that
+// one of the error conditions is a proximity transition, which means we may not have 3 seconds of
+// power left...
+#define ERROR_DELAY 500
 
 // When a car requests state C while the other car is already in state C, we delay them for
 // this long while the other car transitions to half power. THIS INTERVAL MUST BE LONGER
-// THAN THE OVERDRAW_GRACE_PERIOD! (in milliseconds)
-#define TRANSITION_DELAY 3000
+// THAN THE OVERDRAW_GRACE_PERIOD! (in milliseconds) The spec says it must be shorter than
+// 5000 ms.
+#define TRANSITION_DELAY 4500
 
 // This is the current limit (in milliamps) of all of the components on the inlet side of the hydra -
 // the inlet itself, any fuses, and the wiring to the common sides of the relays.
@@ -129,11 +135,15 @@
 
 // This is the number of duty cycle or ammeter samples we keep to make a rolling average to stabilize
 // the display. The balance here is between stability and responsiveness,
-#define ROLLING_AVERAGE_SIZE 0
+#define ROLLING_AVERAGE_SIZE 5
 
-// The maximum number of milliseconds to sample an ammeter pin in order to find five zero-crossings.
-// two and a half cycles at 50 Hz is 50 ms.
-#define CURRENT_SAMPLE_INTERVAL 55
+// The maximum number of milliseconds to sample an ammeter pin in order to find three zero-crossings.
+// one and a half cycles at 50 Hz is 30 ms.
+#define CURRENT_SAMPLE_INTERVAL 35
+
+// Once we detect a zero-crossing, we should not look for one for another quarter cycle or so. 1/4
+// cycle at 50 Hz is 5 ms.
+#define CURRENT_ZERO_DEBOUNCE_INTERVAL 5
 
 // This multiplier is the number of milliamps per A/d converter unit.
 
@@ -152,11 +162,11 @@
 // design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get...
 #define CURRENT_SCALE_FACTOR 88.7625558
 
-#define VERSION "0.9 beta"
+#define VERSION "0.9.1 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
-unsigned long rollingIncomingAverageMA[ROLLING_AVERAGE_SIZE];
+unsigned long incoming_pilot_samples[ROLLING_AVERAGE_SIZE];
 unsigned long car_a_current_samples[ROLLING_AVERAGE_SIZE], car_b_current_samples[ROLLING_AVERAGE_SIZE];
 unsigned long incomingPilotMilliamps;
 unsigned int last_car_a_state, last_car_b_state;
@@ -367,25 +377,32 @@ unsigned long readCurrent(unsigned int car) {
   unsigned int car_pin = (car == CAR_A) ? CAR_A_CURRENT_PIN : CAR_B_CURRENT_PIN;
   unsigned long sum = 0;
   unsigned int zero_crossings = 0;
-  long last_sample = 9999;
+  unsigned long last_zero_crossing_time = 0, now_ms;
+  long last_sample = -1; // should be impossible - the A/d is 0 to 1023.
   unsigned int sample_count = 0;
-  for(unsigned long start = millis(); millis() - start < CURRENT_SAMPLE_INTERVAL; ) {
+  for(unsigned long start = millis(); (now_ms = millis()) - start < CURRENT_SAMPLE_INTERVAL; ) {
     long sample = analogRead(car_pin);
     // If this isn't the first sample, and if the sign of the value differs from the
     // sign of the previous value, then count that as a zero crossing.
-    if (last_sample != 9999 && ((last_sample > 512) != (sample > 512))) zero_crossings++;
+    if (last_sample != -1 && ((last_sample > 512) != (sample > 512))) {
+      // Once we've seen a zero crossing, don't look for one for a little bit.
+      // It's possible that a little noise near zero could cause a two-sample
+      // inversion.
+      if (now_ms - last_zero_crossing_time > CURRENT_ZERO_DEBOUNCE_INTERVAL) {
+        zero_crossings++;
+        last_zero_crossing_time = now_ms;
+      }
+    }
     last_sample = sample;
     switch(zero_crossings) {
        case 0: continue; // Still waiting to start sampling
        case 1:
        case 2:
-       case 3:
-       case 4:
            // Gather the sum-of-the-squares and count how many samples we've collected.
            sum += (unsigned long)((sample - 512) * (sample - 512));
            sample_count++;
            continue;
-       case 5:
+       case 3:
            // The answer is the square root of the mean of the squares.
            // But additionally, that value must be scaled to a real current value.
            return (unsigned long)(sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR);
@@ -411,7 +428,7 @@ unsigned long rollRollingAverage(unsigned long array[], unsigned long new_value)
 
 inline void reportIncomingPilot(unsigned long milliamps) {
 
-  milliamps = rollRollingAverage(rollingIncomingAverageMA, milliamps);
+  milliamps = rollRollingAverage(incoming_pilot_samples, milliamps);
   // Clamp to the maximum allowable current
   if (milliamps > MAXIMUM_INLET_CURRENT) milliamps = MAXIMUM_INLET_CURRENT;
   
@@ -487,7 +504,10 @@ void setup() {
   for(int i = 0; i < ROLLING_AVERAGE_SIZE; i++) {
     pollIncomingPilot();
   }
-  delay(2500); // let the splash screen show
+  
+  // Display the splash screen for 2 seconds total. We spent some time above sampling the
+  // pilot, so don't include that.
+  delay(2000 - (ROLLING_AVERAGE_SIZE * STATE_CHECK_INTERVAL)); // let the splash screen show
   display.clear();
 }
 
@@ -572,33 +592,30 @@ void loop() {
     last_car_a_state = car_a_state;
     switch(car_a_state) {
     case STATE_A:
-      // The car is unplugged. Set the pilot to +12v and if Car B isn't disconnected, give it full power
-      setRelay(CAR_A, LOW);
-      setPilot(CAR_A, HIGH);
-      display.setCursor(0, 1);
-      display.print("A: ---  ");
-      car_a_request_time = 0;
-      if (last_car_b_state != STATE_A)
-        setPilot(CAR_B, FULL);
-      break;
     case STATE_B:
-      // The car is plugged in, or is returning to B from C.
+      // We're in an "off" state of one sort or other.
+      // In either case, clear any connection delay timer,
+      // make sure the relay is off, and set the diplay
+      // appropriately. For state A, set our pilot high,
+      // and fot state B, set it to half if the other car
+      // is charging, full otherwise.
       setRelay(CAR_A, LOW);
+      setPilot(CAR_A, car_a_state == STATE_A ? HIGH : (isCarCharging(CAR_B)?HALF:FULL));
       display.setCursor(0, 1);
-      display.print("A: off  ");
+      display.print(car_a_state == STATE_A ? "A: ---  " : "A: off  ");
       car_a_request_time = 0;
-      // If car B is charging, we get 50% and they get 100%. Else, everybody gets 100%
-      setPilot(CAR_A, isCarCharging(CAR_B)?HALF:FULL);
-      setPilot(CAR_B, FULL);
+      if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
+        setPilot(CAR_B, FULL);
       break;
     case STATE_C:
     case STATE_D: // We don't care about vent requirements.
+      // We're in an "on" state.
       if (isCarCharging(CAR_A)) {
         // we're already charging. This might be a flip from C to D. Ignore it.
         break;
       }
       if (isCarCharging(CAR_B)) {
-        // if car B is charging, we must transition them.
+        // if car B is charging, we must wait while we transition them.
         car_a_request_time = millis();
         // Drop car B down to 50%
         setPilot(CAR_B, HALF);
@@ -606,13 +623,15 @@ void loop() {
         display.print("A: wait ");
       } 
       else {
-        // Car B is not charging. We can just turn our own power on and
-        // reduce them to half power immediately. If they turn on,
-        // they'll be forced to wait the transition period after reducing
+        // Car B is not charging. We can just turn our own power on immediately.
+        // The only way they have a pilot now is if they're in state B, so if they are,
+        // switch them to a half pilot.
+        // If they turn on, they'll be forced to wait the transition period after reducing
         // our pilot, which will coincidently give them a taste of half power
         // before their relay gets turned on.
         setPilot(CAR_A, FULL);
-        setPilot(CAR_B, HALF);
+        if (last_car_b_state == STATE_B)
+          setPilot(CAR_B, HALF);
         setRelay(CAR_A, HIGH);
         car_a_request_time = 0;
       }
@@ -634,24 +653,20 @@ void loop() {
     last_car_b_state = car_b_state;    
     switch(car_b_state) {
     case STATE_A:
-      // The car is unplugged. Set the pilot to +12v and if Car B isn't disconnected, give it full power
-      setRelay(CAR_B, LOW);
-      setPilot(CAR_B, HIGH);
-      display.setCursor(8, 1);
-      display.print("B: ---  ");
-      car_b_request_time = 0;
-      if (last_car_a_state != STATE_A)
-        setPilot(CAR_A, FULL);
-      break;
     case STATE_B:
-      // The car is plugged in, or is returning to B from C.
+      // We're in an "off" state of one sort or other.
+      // In either case, clear any connection delay timer,
+      // make sure the relay is off, and set the diplay
+      // appropriately. For state A, set our pilot high,
+      // and fot state B, set it to half if the other car
+      // is charging, full otherwise.
       setRelay(CAR_B, LOW);
+      setPilot(CAR_B, car_b_state == STATE_A ? HIGH : (isCarCharging(CAR_A)?HALF:FULL));
       display.setCursor(8, 1);
-      display.print("B: off  ");
-      car_a_request_time = 0;
-      // If car A is charging, we get 50% and they get 100%. Else, everybody gets 100%
-      setPilot(CAR_B, isCarCharging(CAR_B)?HALF:FULL);
-      setPilot(CAR_A, FULL);
+      display.print(car_b_state == STATE_A ? "B: ---  " : "B: off  ");
+      car_b_request_time = 0;
+      if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
+        setPilot(CAR_A, FULL);
       break;
     case STATE_C:
     case STATE_D:
@@ -669,7 +684,8 @@ void loop() {
       } 
       else {
         setPilot(CAR_B, FULL);
-        setPilot(CAR_A, HALF);
+        if (last_car_a_state == STATE_B)
+          setPilot(CAR_A, HALF);
         setRelay(CAR_B, HIGH);
         car_b_request_time = 0;
       }
@@ -690,10 +706,10 @@ void loop() {
   // been turned on), so we must error them out before letting the other
   // car start.
   if (isCarReallyCharging(CAR_A)) {
-    int car_a_draw = readCurrent(CAR_A);
+    unsigned long car_a_draw = readCurrent(CAR_A);
 
     // If the other car is charging, then we can only have half power
-    int car_a_limit = incomingPilotMilliamps / (isCarCharging(CAR_B) ? 2 : 1);
+    unsigned long car_a_limit = incomingPilotMilliamps / (isCarCharging(CAR_B) ? 2 : 1);
 
     if (car_a_draw > car_a_limit + OVERDRAW_GRACE_AMPS) {
       // car A has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
@@ -722,10 +738,10 @@ void loop() {
   }
 
   if (isCarReallyCharging(CAR_B)) {
-    int car_b_draw = readCurrent(CAR_B);
+    unsigned long car_b_draw = readCurrent(CAR_B);
 
     // If the other car is charging, then we can only have half power
-    int car_b_limit = incomingPilotMilliamps / (isCarCharging(CAR_A) ? 2 : 1);
+    unsigned long car_b_limit = incomingPilotMilliamps / (isCarCharging(CAR_A) ? 2 : 1);
 
     if (car_b_draw > car_b_limit + OVERDRAW_GRACE_AMPS) {
       // car B has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
