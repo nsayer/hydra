@@ -53,5 +53,5 @@ HARDWARE
 The boards can be ordered from OSHPark at http://oshpark.com/profiles/nsayer
 
 There are two DigiKey BOM files that you can use to buy all the parts to build a Hydra. That, and the
-Eagle .sch and .brd files and a PDF schematic are available in the project downloads.
+Eagle .sch and .brd files and a PDF schematic are available at http://www.kfu.com/~nsayer/hydra/
 
