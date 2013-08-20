@@ -31,38 +31,41 @@
 #define INCOMING_PROXIMITY_PIN  3
 #define INCOMING_PROXIMITY_INT  1
 
-#define CAR_A_PILOT_OUT_PIN     9 // output for toggling pilot on car A
-#define CAR_B_PILOT_OUT_PIN     10	// output for toggling pilot on car B
+#define CAR_A_PILOT_OUT_PIN     9
+#define CAR_B_PILOT_OUT_PIN     10
 
 #define CAR_A_RELAY             7
 #define CAR_B_RELAY             8
 
 // ---------- ANALOG PINS ----------
-// Note that in hardware version 0.6
-//#define CAR_A_PILOT_SENSE       0
-//#define CAR_B_PILOT_SENSE       1
-//#define CAR_A_CURRENT_PIN       2
-//#define CAR_B_CURRENT_PIN       3
-#define CAR_A_PILOT_SENSE_PIN	0	// the pilot sense for car A
-#define CAR_A_CURRENT_PIN	1	// the current transformer ammeter for car A
-#define CAR_B_PILOT_SENSE_PIN	2	// the pilot sense for car B
-#define CAR_B_CURRENT_PIN	3	// the current transformer ammeter for car B
+#define CAR_A_PILOT_SENSE_PIN   0
+#define CAR_B_PILOT_SENSE_PIN   1
+#define CAR_A_CURRENT_PIN       2
+#define CAR_B_CURRENT_PIN       3
+
+#if 0
+// This is for hardware version 0.5 only, which is now obsolete.
+#define CAR_A_PILOT_SENSE_PIN	0
+#define CAR_A_CURRENT_PIN	    1
+#define CAR_B_PILOT_SENSE_PIN	2
+#define CAR_B_CURRENT_PIN	    3
+#endif
 
 // for things like erroring out a car
-#define BOTH                    0
-#define CAR_A			1
-#define CAR_B			2
+#define BOTH     0
+#define CAR_A	 		1
+#define CAR_B 			2
 
 // Don't use 0 or 1 because that's the value of LOW and HIGH.
-#define HALF              3
-#define FULL              4
+#define HALF     3
+#define FULL     4
 
 #define STATE_A		1
 #define STATE_B		2
 #define STATE_C		3
-#define STATE_D         4
+#define STATE_D  4
 #define STATE_E		5
-#define DUNNO		0 // During the low portion of the pilot, we must get -12v in any state
+#define DUNNO		  0
 
 // These are the expected analogRead() ranges for pilot read-back from the cars.
 // These are calculated from the expected voltages seen through the dividor network,
@@ -162,7 +165,17 @@
 // design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get...
 #define CURRENT_SCALE_FACTOR 88.7625558
 
-#define VERSION "0.9.2 beta"
+// Hardware versions 1.0 and beyond have a 6 pin FTDI compatible port laid out on the board.
+// We're going to use this sort of "log4j" style. The log level is 0 for no logging at all
+// (and if it's 0, the Serial won't be initialized), 1 for info level logging (which will
+// simply include state transitions only), or 2 for debugging.
+#define SERIAL_LOG_LEVEL 0
+#define SERIAL_BAUD_RATE 9600
+
+#define INFO 1
+#define DEBUG 2
+
+#define VERSION "0.9.3 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -172,6 +185,35 @@ unsigned long incomingPilotMilliamps;
 unsigned int last_car_a_state, last_car_b_state;
 unsigned long car_a_overdraw_begin, car_b_overdraw_begin, car_a_request_time, car_b_request_time;
 unsigned int relay_state_a, relay_state_b;
+
+void log(unsigned int level, const char * fmt_str, ...) {
+#if SERIAL_LOG_LEVEL > 0
+  if (level > SERIAL_LOG_LEVEL) return;
+  char buf[256]; // Danger, Will Robinson!
+  va_list argptr;
+  va_start(argptr, fmt_str);
+  vsnprintf(buf, sizeof(buf), fmt_str, argptr);
+  va_end(argptr);
+
+  switch(level) {
+    case INFO: Serial.print("INFO:"); break;
+    case DEBUG: Serial.print("DEBUG:"); break;
+    default: Serial.print("UNKNOWN:"); break;
+   }
+  Serial.println(buf);
+#endif
+}
+
+inline const char* state_str(unsigned int state) {
+  switch(state) {
+    case STATE_A: return "A";
+    case STATE_B: return "B";
+    case STATE_C: return "C";
+    case STATE_D: return "D";
+    case STATE_E: return "E";
+    default: return "UNKNOWN";
+  }
+}
 
 // Deal in milliamps so that we don't have to use floating point.
 // Convert the microsecond state timings from the incoming pilot into
@@ -276,6 +318,8 @@ void error(unsigned int car, char err) {
     display.print(" ");
   }
 
+  log(INFO, "Error %c on %s.", err, (car==BOTH)?"both cars":((car==CAR_A)?"car A":"car B"));
+  
   // We should let the car notice the pilot change and stop drawing
   // before we turn off the relay(s).
   delay(ERROR_DELAY);
@@ -462,6 +506,10 @@ void setup() {
   InitTimersSafe();
   display.setMCPType(LTI_TYPE_MCP23017);
   display.begin(16, 2); 
+  
+#if LOG_LEVEL > 0
+  Serial.begin(SERIAL_BAUD_RATE);
+#endif
 
   pinMode(INCOMING_PILOT_PIN, INPUT);
   pinMode(INCOMING_PROXIMITY_PIN, INPUT);
@@ -589,6 +637,7 @@ void loop() {
   // If our current state is "dunno," then it means we passed the diode check, and that we
   // have no information presently to help us transition, so skip it.
   if (last_car_a_state != STATE_E && car_a_state != last_car_a_state && car_a_state != DUNNO) {
+    log(INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
     last_car_a_state = car_a_state;
     switch(car_a_state) {
     case STATE_A:
@@ -650,6 +699,7 @@ void loop() {
     last_car_b_state = DUNNO;
   }
   if (last_car_b_state != STATE_E && car_b_state != last_car_b_state && car_b_state != DUNNO) {
+    log(INFO, "Car B state transition: %s->%s.", state_str(last_car_b_state), state_str(car_b_state));
     last_car_b_state = car_b_state;    
     switch(car_b_state) {
     case STATE_A:
