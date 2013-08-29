@@ -31,7 +31,7 @@
 #define INCOMING_PROXIMITY_PIN  3
 #define INCOMING_PROXIMITY_INT  1
 
-#define OUTGOING_PROXIMITY_PIN    4
+#define OUTGOING_PROXIMITY_PIN  4
 
 #define CAR_A_PILOT_OUT_PIN     9
 #define CAR_B_PILOT_OUT_PIN     10
@@ -47,27 +47,27 @@
 
 #if 0
 // This is for hardware version 0.5 only, which is now obsolete.
-#define CAR_A_PILOT_SENSE_PIN	0
-#define CAR_A_CURRENT_PIN	    1
-#define CAR_B_PILOT_SENSE_PIN	2
-#define CAR_B_CURRENT_PIN	    3
+#define CAR_A_PILOT_SENSE_PIN   0
+#define CAR_A_CURRENT_PIN       1
+#define CAR_B_PILOT_SENSE_PIN   2
+#define CAR_B_CURRENT_PIN       3
 #endif
 
 // for things like erroring out a car
-#define BOTH     0
-#define CAR_A	 		1
-#define CAR_B 			2
+#define BOTH                    0
+#define CAR_A                   1
+#define CAR_B                   2
 
 // Don't use 0 or 1 because that's the value of LOW and HIGH.
-#define HALF     3
-#define FULL     4
+#define HALF                    3
+#define FULL                    4
 
-#define STATE_A		1
-#define STATE_B		2
-#define STATE_C		3
-#define STATE_D  4
-#define STATE_E		5
-#define DUNNO		  0
+#define STATE_A                 1
+#define STATE_B                 2
+#define STATE_C                 3
+#define STATE_D                 4
+#define STATE_E                 5
+#define DUNNO                   0
 
 // These are the expected analogRead() ranges for pilot read-back from the cars.
 // These are calculated from the expected voltages seen through the dividor network,
@@ -103,10 +103,8 @@
 #define OVERDRAW_GRACE_AMPS 1000
 
 // The time between withdrawing the pilot from a car and disconnecting its relay (in milliseconds).
-// The spec says that this must be no shorter than 3000 ms, but the problem with that is that
-// one of the error conditions is a proximity transition, which means we may not have 3 seconds of
-// power left...
-#define ERROR_DELAY 5000
+// The spec says that this must be no shorter than 3000 ms.
+#define ERROR_DELAY 3000
 
 // When a car requests state C while the other car is already in state C, we delay them for
 // this long while the other car transitions to half power. THIS INTERVAL MUST BE LONGER
@@ -181,7 +179,7 @@
 #define SERIAL_LOG_LEVEL LOG_NONE
 #define SERIAL_BAUD_RATE 9600
 
-#define VERSION "0.9.4 beta"
+#define VERSION "0.9.4.1 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -362,19 +360,18 @@ void setRelay(unsigned int car, unsigned int state) {
   }
 }
 
-inline boolean isCarReallyCharging(unsigned int car) {
-  return (car == CAR_A)?relay_state_a:relay_state_b;
-}
-
-// If the car has requested charging and is in the transition delay, or if its
-// relay is actually on, then it's charging.
+// If it's in an error state, it's not charging (the relay may still be on during error delay).
+// If it's in a transition delay, then it's "charging" (the relay is off during transition delay).
+// Otherwise, check the state of the relay.
 inline boolean isCarCharging(unsigned int car) {
   switch(car) {
   case CAR_A:
+    if (last_car_a_state == STATE_E) return LOW;
     if (car_a_request_time != 0) return HIGH;
     return relay_state_a;
     break;
   case CAR_B:
+    if (last_car_b_state == STATE_E) return LOW;
     if (car_b_request_time != 0) return HIGH;
     return relay_state_b;
     break;
@@ -586,6 +583,7 @@ void loop() {
 
   // cut down on how frequently we call millis()
   unsigned long now = millis();
+  boolean proximityOrPilotError = false;
   
   // Update the display
 
@@ -624,21 +622,25 @@ void loop() {
     }
   }
   lastProximity = proximity;
+  if (proximity != HIGH) proximityOrPilotError = true;
 
 
   pollIncomingPilot();
-  display.setCursor(0, 0);
   if (incomingPilotMilliamps < MINIMUM_INLET_CURRENT) {
     if (last_car_a_state != STATE_E || last_car_b_state != STATE_E) { 
+      display.setCursor(0, 0);
       display.print("INPUT PILOT ERR ");
       error(BOTH, 'I');
     }
     // Forget it. Nothing else is worth doing as long as the input pilot continues to be gone.
-    return;
+    proximityOrPilotError = true;
   }
 
-  display.print("EVSE power ");
-  display.print(formatMilliamps(incomingPilotMilliamps));
+  if(!proximityOrPilotError) {
+    display.setCursor(0, 0);
+    display.print("EVSE power ");
+    display.print(formatMilliamps(incomingPilotMilliamps));
+  }
 
   // Adjust the pilot levels to follow any changes in the incoming pilot
   switch(last_car_a_state) {
@@ -671,9 +673,14 @@ void loop() {
     switch(car_a_state) {
     case STATE_A:
       // we were in error, but the car's been disconnected.
-      // Finesse that by clearing the error state. The next time through
+      // If we still have a pilot or proximity error, then
+      // we can't clear the error.
+      if (!proximityOrPilotError) {
+      // If not, clear the error state. The next time through
       // will take us back to state A.
-      last_car_a_state = DUNNO;
+        last_car_a_state = DUNNO;
+        log(LOG_INFO, "Car A disconnected, clearing error");
+      }
       // fall through...
     case STATE_B:
       // If we see a transition to state B, the error is still in effect, but complete (and
@@ -685,7 +692,8 @@ void loop() {
       break;
     }
   } else if (car_a_state != last_car_a_state && car_a_state != DUNNO) {
-    log(LOG_INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
+    if (last_car_b_state != DUNNO)
+      log(LOG_INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
     last_car_a_state = car_a_state;
     switch(car_a_state) {
     case STATE_A:
@@ -744,9 +752,14 @@ void loop() {
     switch(car_b_state) {
     case STATE_A:
       // we were in error, but the car's been disconnected.
-      // Finesse that by clearing the error state. The next time through
+      // If we still have a pilot or proximity error, then
+      // we can't clear the error.
+      if (!proximityOrPilotError) {
+      // If not, clear the error state. The next time through
       // will take us back to state A.
-      last_car_b_state = DUNNO;
+        last_car_b_state = DUNNO;
+        log(LOG_INFO, "Car B disconnected, clearing error");
+      }
       // fall through...
     case STATE_B:
       // If we see a transition to state B, the error is still in effect, but complete (and
@@ -758,7 +771,8 @@ void loop() {
       break;
     }
   } else if (car_b_state != last_car_b_state && car_b_state != DUNNO) {
-    log(LOG_INFO, "Car B state transition: %s->%s.", state_str(last_car_b_state), state_str(car_b_state));
+    if (last_car_b_state != DUNNO)
+      log(LOG_INFO, "Car B state transition: %s->%s.", state_str(last_car_b_state), state_str(car_b_state));
     last_car_b_state = car_b_state;    
     switch(car_b_state) {
     case STATE_A:
@@ -814,7 +828,7 @@ void loop() {
   // attempt to reduce it to half power (and the other car has not yet
   // been turned on), so we must error them out before letting the other
   // car start.
-  if (isCarReallyCharging(CAR_A)) {
+  if (isCarCharging(CAR_A) && car_a_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
     unsigned long car_a_draw = readCurrent(CAR_A);
 
     if (now - last_current_log_car_a > CURRENT_LOG_INTERVAL) {
@@ -851,7 +865,7 @@ void loop() {
     memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
   }
 
-  if (isCarReallyCharging(CAR_B)) {
+  if (isCarCharging(CAR_B) && car_b_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
     unsigned long car_b_draw = readCurrent(CAR_B);
 
     if (now - last_current_log_car_b > CURRENT_LOG_INTERVAL) {
@@ -910,3 +924,6 @@ void loop() {
     setRelay(CAR_B, LOW);
   }
 }
+
+
+
