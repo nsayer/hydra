@@ -31,6 +31,8 @@
 #define INCOMING_PROXIMITY_PIN  3
 #define INCOMING_PROXIMITY_INT  1
 
+#define OUTGOING_PROXIMITY_PIN    4
+
 #define CAR_A_PILOT_OUT_PIN     9
 #define CAR_B_PILOT_OUT_PIN     10
 
@@ -98,13 +100,13 @@
 
 // This is how much "slop" we allow a car to have in terms of keeping under its current allowance.
 // That is, this value (in milliamps) plus the calculated current limit is what we enforce.
-#define OVERDRAW_GRACE_AMPS 500
+#define OVERDRAW_GRACE_AMPS 1000
 
 // The time between withdrawing the pilot from a car and disconnecting its relay (in milliseconds).
 // The spec says that this must be no shorter than 3000 ms, but the problem with that is that
 // one of the error conditions is a proximity transition, which means we may not have 3 seconds of
 // power left...
-#define ERROR_DELAY 500
+#define ERROR_DELAY 5000
 
 // When a car requests state C while the other car is already in state C, we delay them for
 // this long while the other car transitions to half power. THIS INTERVAL MUST BE LONGER
@@ -148,6 +150,9 @@
 // cycle at 50 Hz is 5 ms.
 #define CURRENT_ZERO_DEBOUNCE_INTERVAL 5
 
+// How often (in milliseconds) is the current draw by a car logged?
+#define CURRENT_LOG_INTERVAL 1000
+
 // This multiplier is the number of milliamps per A/d converter unit.
 
 // First, you need to select the burden resistor for the CT. You choose the largest value possible such that
@@ -165,17 +170,18 @@
 // design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get...
 #define CURRENT_SCALE_FACTOR 88.7625558
 
+#define LOG_NONE 0
+#define LOG_INFO 1
+#define LOG_DEBUG 2
+
 // Hardware versions 1.0 and beyond have a 6 pin FTDI compatible port laid out on the board.
 // We're going to use this sort of "log4j" style. The log level is 0 for no logging at all
 // (and if it's 0, the Serial won't be initialized), 1 for info level logging (which will
 // simply include state transitions only), or 2 for debugging.
-#define SERIAL_LOG_LEVEL 0
+#define SERIAL_LOG_LEVEL LOG_NONE
 #define SERIAL_BAUD_RATE 9600
 
-#define INFO 1
-#define DEBUG 2
-
-#define VERSION "0.9.3 beta"
+#define VERSION "0.9.4 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -183,8 +189,12 @@ unsigned long incoming_pilot_samples[ROLLING_AVERAGE_SIZE];
 unsigned long car_a_current_samples[ROLLING_AVERAGE_SIZE], car_b_current_samples[ROLLING_AVERAGE_SIZE];
 unsigned long incomingPilotMilliamps;
 unsigned int last_car_a_state, last_car_b_state;
-unsigned long car_a_overdraw_begin, car_b_overdraw_begin, car_a_request_time, car_b_request_time;
+unsigned long car_a_overdraw_begin, car_b_overdraw_begin;
+unsigned long car_a_request_time, car_b_request_time;
+unsigned long car_a_error_time, car_b_error_time;
+unsigned long last_current_log_car_a, last_current_log_car_b;
 unsigned int relay_state_a, relay_state_b;
+unsigned int lastProximity;
 
 void log(unsigned int level, const char * fmt_str, ...) {
 #if SERIAL_LOG_LEVEL > 0
@@ -196,22 +206,34 @@ void log(unsigned int level, const char * fmt_str, ...) {
   va_end(argptr);
 
   switch(level) {
-    case INFO: Serial.print("INFO:"); break;
-    case DEBUG: Serial.print("DEBUG:"); break;
-    default: Serial.print("UNKNOWN:"); break;
-   }
+  case LOG_INFO: 
+    Serial.print("INFO:"); 
+    break;
+  case LOG_DEBUG: 
+    Serial.print("DEBUG:"); 
+    break;
+  default: 
+    Serial.print("UNKNOWN:"); 
+    break;
+  }
   Serial.println(buf);
 #endif
 }
 
 inline const char* state_str(unsigned int state) {
   switch(state) {
-    case STATE_A: return "A";
-    case STATE_B: return "B";
-    case STATE_C: return "C";
-    case STATE_D: return "D";
-    case STATE_E: return "E";
-    default: return "UNKNOWN";
+  case STATE_A: 
+    return "A";
+  case STATE_B: 
+    return "B";
+  case STATE_C: 
+    return "C";
+  case STATE_D: 
+    return "D";
+  case STATE_E: 
+    return "E";
+  default: 
+    return "UNKNOWN";
   }
 }
 
@@ -301,9 +323,15 @@ void error(unsigned int car, char err) {
 
   if (car == BOTH || car == CAR_A) {
     setPilot(CAR_A, HIGH);
+    last_car_a_state = STATE_E;
+    car_a_error_time = millis();
+    car_a_request_time = 0;
   }
   if (car == BOTH || car == CAR_B) {
     setPilot(CAR_B, HIGH);
+    last_car_b_state = STATE_E;
+    car_b_error_time = millis();
+    car_b_request_time = 0;
   }
   if (car == BOTH || car == CAR_A) {
     display.setCursor(0, 1);
@@ -318,33 +346,18 @@ void error(unsigned int car, char err) {
     display.print(" ");
   }
 
-  log(INFO, "Error %c on %s.", err, (car==BOTH)?"both cars":((car==CAR_A)?"car A":"car B"));
-  
-  // We should let the car notice the pilot change and stop drawing
-  // before we turn off the relay(s).
-  delay(ERROR_DELAY);
-
-  if (car == BOTH || car == CAR_A) {
-    setRelay(CAR_A, LOW);
-    last_car_a_state = STATE_E;
-    car_a_request_time = 0;
-  }
-  if (car == BOTH || car == CAR_B) {
-    setRelay(CAR_B, LOW);
-    last_car_b_state = STATE_E;
-    car_b_request_time = 0;
-  }
+  log(LOG_INFO, "Error %c on %s.", err, (car==BOTH)?"both cars":((car==CAR_A)?"car A":"car B"));
 }
 
 void setRelay(unsigned int car, unsigned int state) {
   switch(car) {
-    case CAR_A:
-      digitalWrite(CAR_A_RELAY, state);
-      relay_state_a = state;
+  case CAR_A:
+    digitalWrite(CAR_A_RELAY, state);
+    relay_state_a = state;
     break;
-    case CAR_B:
-      digitalWrite(CAR_B_RELAY, state);
-      relay_state_b = state;
+  case CAR_B:
+    digitalWrite(CAR_B_RELAY, state);
+    relay_state_b = state;
     break;
   }
 }
@@ -357,16 +370,16 @@ inline boolean isCarReallyCharging(unsigned int car) {
 // relay is actually on, then it's charging.
 inline boolean isCarCharging(unsigned int car) {
   switch(car) {
-    case CAR_A:
-      if (car_a_request_time != 0) return HIGH;
-      return relay_state_a;
+  case CAR_A:
+    if (car_a_request_time != 0) return HIGH;
+    return relay_state_a;
     break;
-    case CAR_B:
-      if (car_b_request_time != 0) return HIGH;
-      return relay_state_b;
+  case CAR_B:
+    if (car_b_request_time != 0) return HIGH;
+    return relay_state_b;
     break;
-    default:
-      return LOW; // This should not be possible
+  default:
+    return LOW; // This should not be possible
   }
 }
 
@@ -398,7 +411,7 @@ int checkState(unsigned int car) {
     if (val > high) high = val;
     if (val < low) low = val;
   }
-    
+
   // If the pilot low was below zero, then that means we must have
   // been oscillating. If we were, then perform the diode check.
   if (low < PILOT_0V && low > PILOT_DIODE_MAX) {
@@ -406,11 +419,14 @@ int checkState(unsigned int car) {
   }
   if (high >= STATE_A_MIN) {
     return STATE_A;
-  } else if (high >= STATE_B_MIN && high <= STATE_B_MAX) {
+  } 
+  else if (high >= STATE_B_MIN && high <= STATE_B_MAX) {
     return STATE_B;
-  } else if (high >= STATE_C_MIN && high <= STATE_C_MAX) {
+  } 
+  else if (high >= STATE_C_MIN && high <= STATE_C_MAX) {
     return STATE_C;
-  } else if (high >= STATE_D_MIN && high <= STATE_D_MAX) {
+  } 
+  else if (high >= STATE_D_MIN && high <= STATE_D_MAX) {
     return STATE_D;
   }
   // I dunno how we got here, but we fail it.
@@ -439,17 +455,18 @@ unsigned long readCurrent(unsigned int car) {
     }
     last_sample = sample;
     switch(zero_crossings) {
-       case 0: continue; // Still waiting to start sampling
-       case 1:
-       case 2:
-           // Gather the sum-of-the-squares and count how many samples we've collected.
-           sum += (unsigned long)((sample - 512) * (sample - 512));
-           sample_count++;
-           continue;
-       case 3:
-           // The answer is the square root of the mean of the squares.
-           // But additionally, that value must be scaled to a real current value.
-           return (unsigned long)(sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR);
+    case 0: 
+      continue; // Still waiting to start sampling
+    case 1:
+    case 2:
+      // Gather the sum-of-the-squares and count how many samples we've collected.
+      sum += (unsigned long)((sample - 512) * (sample - 512));
+      sample_count++;
+      continue;
+    case 3:
+      // The answer is the square root of the mean of the squares.
+      // But additionally, that value must be scaled to a real current value.
+      return (unsigned long)(sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR);
     }
   }
   // ran out of time. Assume that it's simply not oscillating any. 
@@ -475,9 +492,9 @@ inline void reportIncomingPilot(unsigned long milliamps) {
   milliamps = rollRollingAverage(incoming_pilot_samples, milliamps);
   // Clamp to the maximum allowable current
   if (milliamps > MAXIMUM_INLET_CURRENT) milliamps = MAXIMUM_INLET_CURRENT;
-  
+
   milliamps -= INLET_CURRENT_DERATE;
-    
+
   incomingPilotMilliamps = milliamps;
 }
 
@@ -506,17 +523,20 @@ void setup() {
   InitTimersSafe();
   display.setMCPType(LTI_TYPE_MCP23017);
   display.begin(16, 2); 
-  
+
 #if LOG_LEVEL > 0
   Serial.begin(SERIAL_BAUD_RATE);
 #endif
 
   pinMode(INCOMING_PILOT_PIN, INPUT);
   pinMode(INCOMING_PROXIMITY_PIN, INPUT);
+  pinMode(OUTGOING_PROXIMITY_PIN, OUTPUT);
   pinMode(CAR_A_PILOT_OUT_PIN, OUTPUT);
   pinMode(CAR_B_PILOT_OUT_PIN, OUTPUT);
   pinMode(CAR_A_RELAY, OUTPUT);
   pinMode(CAR_B_RELAY, OUTPUT);
+
+  digitalWrite(OUTGOING_PROXIMITY_PIN, LOW);
 
   // Enter state A on both cars
   setPilot(CAR_A, HIGH);
@@ -533,6 +553,9 @@ void setup() {
   car_b_request_time = 0;
   car_a_overdraw_begin = 0;
   car_b_overdraw_begin = 0;
+  last_current_log_car_a = 0;
+  last_current_log_car_b = 0;
+  lastProximity = HIGH;
 
   display.setBacklight(WHITE);
   display.clear();
@@ -552,7 +575,7 @@ void setup() {
   for(int i = 0; i < ROLLING_AVERAGE_SIZE; i++) {
     pollIncomingPilot();
   }
-  
+
   // Display the splash screen for 2 seconds total. We spent some time above sampling the
   // pilot, so don't include that.
   delay(2000 - (ROLLING_AVERAGE_SIZE * PILOT_POLL_INTERVAL)); // let the splash screen show
@@ -561,6 +584,9 @@ void setup() {
 
 void loop() {
 
+  // cut down on how frequently we call millis()
+  unsigned long now = millis();
+  
   // Update the display
 
   if (last_car_a_state == STATE_E || last_car_b_state == STATE_E) {
@@ -580,64 +606,86 @@ void loop() {
   }
 
   // Check proximity
-  if (digitalRead(INCOMING_PROXIMITY_PIN) != HIGH) {
-    display.setCursor(0, 0);
-    display.print("DISCONNECTING...");
-    error(BOTH, 'P');
-    return; // We're about to bail... don't bother with anything else.
+  unsigned int proximity = digitalRead(INCOMING_PROXIMITY_PIN);
+  if (proximity != lastProximity) {
+    if (proximity != HIGH) {
+
+      // EVs are supposed to react to a proximity transition much faster than
+      // an error transition.
+      digitalWrite(OUTGOING_PROXIMITY_PIN, HIGH);
+
+      display.setCursor(0, 0);
+      display.print("DISCONNECTING...");
+      error(BOTH, 'P');
+    } 
+    else {
+      // In case someone pushed the button and changed their mind
+      digitalWrite(OUTGOING_PROXIMITY_PIN, LOW);
+    }
   }
-  
+  lastProximity = proximity;
+
+
   pollIncomingPilot();
   display.setCursor(0, 0);
   if (incomingPilotMilliamps < MINIMUM_INLET_CURRENT) {
-    display.print("INPUT PILOT ERR ");
-    error(BOTH, 'I');
+    if (last_car_a_state != STATE_E || last_car_b_state != STATE_E) { 
+      display.print("INPUT PILOT ERR ");
+      error(BOTH, 'I');
+    }
     // Forget it. Nothing else is worth doing as long as the input pilot continues to be gone.
     return;
   }
 
-  
   display.print("EVSE power ");
   display.print(formatMilliamps(incomingPilotMilliamps));
 
   // Adjust the pilot levels to follow any changes in the incoming pilot
   switch(last_car_a_state) {
-    case STATE_A:
-    case STATE_E:
-      setPilot(CAR_A, HIGH);
-      break;
-    case STATE_B:
-    case STATE_C:
-    case STATE_D:
-      setPilot(CAR_A, isCarCharging(CAR_B)?HALF:FULL);
-      break;
+  case STATE_A:
+  case STATE_E:
+    setPilot(CAR_A, HIGH);
+    break;
+  case STATE_B:
+  case STATE_C:
+  case STATE_D:
+    setPilot(CAR_A, isCarCharging(CAR_B)?HALF:FULL);
+    break;
   }
   switch(last_car_b_state) {
-    case STATE_A:
-    case STATE_E:
-      setPilot(CAR_B, HIGH);
-      break;
-    case STATE_B:
-    case STATE_C:
-    case STATE_D:
-      setPilot(CAR_B, isCarCharging(CAR_A)?HALF:FULL);
-      break;
+  case STATE_A:
+  case STATE_E:
+    setPilot(CAR_B, HIGH);
+    break;
+  case STATE_B:
+  case STATE_C:
+  case STATE_D:
+    setPilot(CAR_B, isCarCharging(CAR_A)?HALF:FULL);
+    break;
   }
 
   // Check the pilot sense on each car.
   unsigned int car_a_state = checkState(CAR_A);
-  if (last_car_a_state == STATE_E && car_a_state == STATE_A) {
-    // we were in error, but the car's been disconnected.
-    // Finesse that by clearing the error state. The following logic
-    // will take us back to state A.
-    last_car_a_state = DUNNO;
-  }
 
-  // If we're in error state, no transitions out are allowed (except to state A, handled above).
-  // If our current state is "dunno," then it means we passed the diode check, and that we
-  // have no information presently to help us transition, so skip it.
-  if (last_car_a_state != STATE_E && car_a_state != last_car_a_state && car_a_state != DUNNO) {
-    log(INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
+  if (last_car_a_state == STATE_E) {
+    switch(car_a_state) {
+    case STATE_A:
+      // we were in error, but the car's been disconnected.
+      // Finesse that by clearing the error state. The next time through
+      // will take us back to state A.
+      last_car_a_state = DUNNO;
+      // fall through...
+    case STATE_B:
+      // If we see a transition to state B, the error is still in effect, but complete (and
+      // cancel) any pending relay opening.
+      if (car_a_error_time != 0) {
+        car_a_error_time = 0;
+        setRelay(CAR_A, LOW);
+      }
+      break;
+    }
+  } else if (car_a_state != last_car_a_state && car_a_state != DUNNO) {
+    log(LOG_INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
     last_car_a_state = car_a_state;
     switch(car_a_state) {
     case STATE_A:
@@ -665,7 +713,7 @@ void loop() {
       }
       if (isCarCharging(CAR_B)) {
         // if car B is charging, we must wait while we transition them.
-        car_a_request_time = millis();
+        car_a_request_time = now;
         // Drop car B down to 50%
         setPilot(CAR_B, HALF);
         display.setCursor(0, 1);
@@ -692,14 +740,25 @@ void loop() {
   }
 
   unsigned int car_b_state = checkState(CAR_B);
-  if (last_car_b_state == STATE_E && car_b_state == STATE_A) {
-    // we were in error, but the car's been disconnected.
-    // Finesse that by clearing the error state. The following logic
-    // will take us back to state A.
-    last_car_b_state = DUNNO;
-  }
-  if (last_car_b_state != STATE_E && car_b_state != last_car_b_state && car_b_state != DUNNO) {
-    log(INFO, "Car B state transition: %s->%s.", state_str(last_car_b_state), state_str(car_b_state));
+  if (last_car_b_state == STATE_E) {
+    switch(car_b_state) {
+    case STATE_A:
+      // we were in error, but the car's been disconnected.
+      // Finesse that by clearing the error state. The next time through
+      // will take us back to state A.
+      last_car_b_state = DUNNO;
+      // fall through...
+    case STATE_B:
+      // If we see a transition to state B, the error is still in effect, but complete (and
+      // cancel) any pending relay opening.
+      if (car_b_error_time != 0) {
+        car_b_error_time = 0;
+        setRelay(CAR_B, LOW);
+      }
+      break;
+    }
+  } else if (car_b_state != last_car_b_state && car_b_state != DUNNO) {
+    log(LOG_INFO, "Car B state transition: %s->%s.", state_str(last_car_b_state), state_str(car_b_state));
     last_car_b_state = car_b_state;    
     switch(car_b_state) {
     case STATE_A:
@@ -726,7 +785,7 @@ void loop() {
       }
       if (isCarCharging(CAR_A)) {
         // if car A is charging, we must transition them.
-        car_b_request_time = millis();
+        car_b_request_time = now;
         // Drop car A down to 50%
         setPilot(CAR_A, HALF);
         display.setCursor(8, 1);
@@ -758,16 +817,21 @@ void loop() {
   if (isCarReallyCharging(CAR_A)) {
     unsigned long car_a_draw = readCurrent(CAR_A);
 
+    if (now - last_current_log_car_a > CURRENT_LOG_INTERVAL) {
+      last_current_log_car_a = now;
+      log(LOG_INFO, "Car A current draw %lu mA", car_a_draw);
+    }
+    
     // If the other car is charging, then we can only have half power
     unsigned long car_a_limit = incomingPilotMilliamps / (isCarCharging(CAR_B) ? 2 : 1);
 
     if (car_a_draw > car_a_limit + OVERDRAW_GRACE_AMPS) {
       // car A has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
       if (car_a_overdraw_begin == 0) {
-        car_a_overdraw_begin = millis();
+        car_a_overdraw_begin = now;
       } 
       else {
-        if (millis() - car_a_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
+        if (now - car_a_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
           error(CAR_A, 'O');
           return;
         }
@@ -790,16 +854,21 @@ void loop() {
   if (isCarReallyCharging(CAR_B)) {
     unsigned long car_b_draw = readCurrent(CAR_B);
 
+    if (now - last_current_log_car_b > CURRENT_LOG_INTERVAL) {
+      last_current_log_car_b = now;
+      log(LOG_INFO, "Car B current draw %lu mA", car_b_draw);
+    }
+    
     // If the other car is charging, then we can only have half power
     unsigned long car_b_limit = incomingPilotMilliamps / (isCarCharging(CAR_A) ? 2 : 1);
 
     if (car_b_draw > car_b_limit + OVERDRAW_GRACE_AMPS) {
       // car B has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
       if (car_b_overdraw_begin == 0) {
-        car_b_overdraw_begin = millis();
+        car_b_overdraw_begin = now;
       } 
       else {
-        if (millis() - car_b_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
+        if (now - car_b_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
           error(CAR_B, 'O');
           return;
         }
@@ -818,21 +887,26 @@ void loop() {
     memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
   }
 
-  if (car_a_request_time != 0 && millis() - car_a_request_time > TRANSITION_DELAY) {
+  if (car_a_request_time != 0 && now - car_a_request_time > TRANSITION_DELAY) {
     // We've waited long enough.
     car_a_request_time = 0;
     setRelay(CAR_A, HIGH);
     display.setCursor(0, 1);
     display.print("A: ON   ");
   }
-  if (car_b_request_time != 0 && millis() - car_b_request_time > TRANSITION_DELAY) {
+  if (car_a_error_time != 0 && now - car_a_error_time > ERROR_DELAY) {
+    car_a_error_time = 0;
+    setRelay(CAR_A, LOW);
+  }
+  if (car_b_request_time != 0 && now - car_b_request_time > TRANSITION_DELAY) {
     // We've waited long enough.
     car_b_request_time = 0;
     setRelay(CAR_B, HIGH);
     display.setCursor(8, 1);
     display.print("B: ON   ");
   }
+  if (car_b_error_time != 0 && now - car_b_error_time > ERROR_DELAY) {
+    car_b_error_time = 0;
+    setRelay(CAR_B, LOW);
+  }
 }
-
-
-
