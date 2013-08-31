@@ -90,7 +90,10 @@
 // This represents 0 volts. No, it's not 512. Deal.
 #define PILOT_0V         556
 // -10 volts. We're fairly generous.
-#define PILOT_DIODE_MAX  244
+#define PILOT_DIODE_MAX  250
+
+// This is the amount the incoming pilot needs to change for us to react (in milliamps).
+#define PILOT_FUZZ 500
 
 // This is how long we allow a car to draw more current than it is allowed before we
 // error it out (in milliseconds). The spec says that a car is supposed to have 5000
@@ -136,6 +139,9 @@
 // this way.
 #define STATE_CHECK_INTERVAL 100
 
+// How often (in milliseconds) is the state of both cars logged?
+#define STATE_LOG_INTERVAL 60000
+
 // This is the number of duty cycle or ammeter samples we keep to make a rolling average to stabilize
 // the display. The balance here is between stability and responsiveness,
 #define ROLLING_AVERAGE_SIZE 5
@@ -176,21 +182,22 @@
 // We're going to use this sort of "log4j" style. The log level is 0 for no logging at all
 // (and if it's 0, the Serial won't be initialized), 1 for info level logging (which will
 // simply include state transitions only), or 2 for debugging.
-#define SERIAL_LOG_LEVEL LOG_DEBUG
+#define SERIAL_LOG_LEVEL LOG_INFO
 #define SERIAL_BAUD_RATE 9600
 
-#define VERSION "0.9.4.1 beta"
+#define VERSION "0.9.4.2 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
 unsigned long incoming_pilot_samples[ROLLING_AVERAGE_SIZE];
 unsigned long car_a_current_samples[ROLLING_AVERAGE_SIZE], car_b_current_samples[ROLLING_AVERAGE_SIZE];
-unsigned long incomingPilotMilliamps;
+unsigned long incomingPilotMilliamps, lastIncomingPilot;
 unsigned int last_car_a_state, last_car_b_state;
 unsigned long car_a_overdraw_begin, car_b_overdraw_begin;
 unsigned long car_a_request_time, car_b_request_time;
 unsigned long car_a_error_time, car_b_error_time;
 unsigned long last_current_log_car_a, last_current_log_car_b;
+unsigned long last_state_log;
 unsigned int relay_state_a, relay_state_b;
 unsigned int lastProximity;
 
@@ -218,6 +225,25 @@ void log(unsigned int level, const char * fmt_str, ...) {
 #endif
 }
 
+inline const char *car_str(unsigned int car) {
+  switch(car) {
+    case CAR_A: return "car A";
+    case CAR_B: return "car B";
+    case BOTH: return "both car";
+    default: return "UNKNOWN";
+  }
+}
+
+inline const char *logic_str(unsigned int state) {
+  switch(state) {
+    case LOW: return "LOW";
+    case HIGH: return "HIGH";
+    case HALF: return "HALF";
+    case FULL: return "FULL";
+    default: return "UNKNOWN";
+  }
+}
+
 inline const char* state_str(unsigned int state) {
   switch(state) {
   case STATE_A: 
@@ -239,7 +265,7 @@ inline const char* state_str(unsigned int state) {
 // Convert the microsecond state timings from the incoming pilot into
 // an instantaneous current allowance value. With polling, it's
 // the two sample counts, but the math winds up being exactly the same.
-unsigned long timeToMA(unsigned long msecHigh, unsigned long msecLow) {
+inline unsigned long timeToMA(unsigned long msecHigh, unsigned long msecLow) {
   // First, normalize the frequency to 1000 Hz.
   // msec is the number of microseconds out of 1000 that the signal stayed high
   long msec = (msecHigh * 1000) / (msecHigh + msecLow);
@@ -259,7 +285,7 @@ unsigned long timeToMA(unsigned long msecHigh, unsigned long msecLow) {
 
 // Convert a milliamp allowance into an outgoing pilot duty cycle.
 // In lieu of floating point, this is microseconds high out of 1000.
-unsigned long MAToMsec(unsigned long milliamps) {
+inline unsigned long MAToMsec(unsigned long milliamps) {
   if (milliamps < 6000) {
     return 9999; // illegal - set pilot to "high"
   } 
@@ -276,7 +302,7 @@ unsigned long MAToMsec(unsigned long milliamps) {
 
 // Convert a milliamp allowance into a value suitable for
 // pwmWrite - a scale from 0 to 255.
-unsigned int MAtoPwm(unsigned long milliamps) {
+inline unsigned int MAtoPwm(unsigned long milliamps) {
   unsigned long out = MAToMsec(milliamps);
 
   if (out >= 1000) return 255; // full on
@@ -313,24 +339,26 @@ char *formatMilliamps(unsigned long milliamps) {
 }
 
 void error(unsigned int car, char err) {
-  display.setBacklight(RED);
-
+  unsigned long now = millis(); // so both cars get the same time.
   // Set the pilot to constant 12: indicates an EVSE error.
   // We can't use -12, because then we'd never detect a return
-  // to state A.
+  // to state A. But the spec says we're allowed to return to B1
+  // (that is, turn off the oscillator) whenever we want.
 
   if (car == BOTH || car == CAR_A) {
     setPilot(CAR_A, HIGH);
     last_car_a_state = STATE_E;
-    car_a_error_time = millis();
+    car_a_error_time = now;
     car_a_request_time = 0;
   }
   if (car == BOTH || car == CAR_B) {
     setPilot(CAR_B, HIGH);
     last_car_b_state = STATE_E;
-    car_b_error_time = millis();
+    car_b_error_time = now;
     car_b_request_time = 0;
   }
+  
+  display.setBacklight(RED);
   if (car == BOTH || car == CAR_A) {
     display.setCursor(0, 1);
     display.print("A:ERR ");
@@ -344,10 +372,11 @@ void error(unsigned int car, char err) {
     display.print(" ");
   }
 
-  log(LOG_INFO, "Error %c on %s.", err, (car==BOTH)?"both cars":((car==CAR_A)?"car A":"car B"));
+  log(LOG_INFO, "Error %c on %s", err, car_str(car));
 }
 
 void setRelay(unsigned int car, unsigned int state) {
+  log(LOG_DEBUG, "Setting %s relay to %s", car_str(car), logic_str(state));
   switch(car) {
   case CAR_A:
     digitalWrite(CAR_A_RELAY, state);
@@ -385,6 +414,7 @@ inline boolean isCarCharging(unsigned int car) {
 // state E. HALF means that the other car is charging, so we only can have half power.
 
 void setPilot(unsigned int car, unsigned int which) {
+  log(LOG_DEBUG, "Setting %s pilot to %s", car_str(car), logic_str(which));
   // set the outgoing pilot for the given car to either HALF state, FULL state, or HIGH.
   int pin = (car == CAR_A) ? CAR_A_PILOT_OUT_PIN : CAR_B_PILOT_OUT_PIN;
   if (which == LOW || which == HIGH) {
@@ -580,6 +610,7 @@ void setup() {
   for(int i = 0; i < ROLLING_AVERAGE_SIZE; i++) {
     pollIncomingPilot();
   }
+  lastIncomingPilot = incomingPilotMilliamps;
 
   // Display the splash screen for 2 seconds total. We spent some time above sampling the
   // pilot, so don't include that.
@@ -616,6 +647,8 @@ void loop() {
   if (proximity != lastProximity) {
     if (proximity != HIGH) {
 
+      log(LOG_INFO, "Incoming proximity disconnect");
+      
       // EVs are supposed to react to a proximity transition much faster than
       // an error transition.
       digitalWrite(OUTGOING_PROXIMITY_PIN, HIGH);
@@ -625,6 +658,8 @@ void loop() {
       error(BOTH, 'P');
     } 
     else {
+      log(LOG_INFO, "Incoming proximity restore");
+      
       // In case someone pushed the button and changed their mind
       digitalWrite(OUTGOING_PROXIMITY_PIN, LOW);
     }
@@ -651,27 +686,22 @@ void loop() {
   }
 
   // Adjust the pilot levels to follow any changes in the incoming pilot
-  switch(last_car_a_state) {
-  case STATE_A:
-  case STATE_E:
-    setPilot(CAR_A, HIGH);
-    break;
-  case STATE_B:
-  case STATE_C:
-  case STATE_D:
-    setPilot(CAR_A, isCarCharging(CAR_B)?HALF:FULL);
-    break;
-  }
-  switch(last_car_b_state) {
-  case STATE_A:
-  case STATE_E:
-    setPilot(CAR_B, HIGH);
-    break;
-  case STATE_B:
-  case STATE_C:
-  case STATE_D:
-    setPilot(CAR_B, isCarCharging(CAR_A)?HALF:FULL);
-    break;
+  if (abs(incomingPilotMilliamps - lastIncomingPilot) > PILOT_FUZZ) {
+    switch(last_car_a_state) {
+    case STATE_B:
+    case STATE_C:
+    case STATE_D:
+      setPilot(CAR_A, isCarCharging(CAR_B)?HALF:FULL);
+      break;
+    }
+    switch(last_car_b_state) {
+    case STATE_B:
+    case STATE_C:
+    case STATE_D:
+      setPilot(CAR_B, isCarCharging(CAR_A)?HALF:FULL);
+      break;
+    }
+    lastIncomingPilot = incomingPilotMilliamps;
   }
 
   // Check the pilot sense on each car.
@@ -699,7 +729,7 @@ void loop() {
       }
       break;
     }
-  } else if (car_a_state != last_car_a_state && car_a_state != DUNNO) {
+  } else if (car_a_state != last_car_a_state) {
     if (last_car_a_state != DUNNO)
       log(LOG_INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
     last_car_a_state = car_a_state;
@@ -778,7 +808,7 @@ void loop() {
       }
       break;
     }
-  } else if (car_b_state != last_car_b_state && car_b_state != DUNNO) {
+  } else if (car_b_state != last_car_b_state) {
     if (last_car_b_state != DUNNO)
       log(LOG_INFO, "Car B state transition: %s->%s.", state_str(last_car_b_state), state_str(car_b_state));
     last_car_b_state = car_b_state;    
@@ -826,7 +856,13 @@ void loop() {
       break;
     }
   }
-
+  
+  if (now - last_state_log > STATE_LOG_INTERVAL) {
+    last_state_log = now;
+    log(LOG_INFO, "States: Car A, %s; Car B, %s", state_str(last_car_a_state), state_str(last_car_b_state));
+    log(LOG_INFO, "Incoming pilot %s", formatMilliamps(incomingPilotMilliamps));
+  }
+   
   // Update the ammeter display and check for overdraw conditions.
   // We allow a 5 second grace because the J1772 spec requires allowing
   // the car 5 seconds to respond to incoming pilot changes.
