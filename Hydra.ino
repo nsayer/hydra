@@ -176,7 +176,7 @@
 // We're going to use this sort of "log4j" style. The log level is 0 for no logging at all
 // (and if it's 0, the Serial won't be initialized), 1 for info level logging (which will
 // simply include state transitions only), or 2 for debugging.
-#define SERIAL_LOG_LEVEL LOG_NONE
+#define SERIAL_LOG_LEVEL LOG_DEBUG
 #define SERIAL_BAUD_RATE 9600
 
 #define VERSION "0.9.4.1 beta"
@@ -205,13 +205,13 @@ void log(unsigned int level, const char * fmt_str, ...) {
 
   switch(level) {
   case LOG_INFO: 
-    Serial.print("INFO:"); 
+    Serial.print("INFO: "); 
     break;
   case LOG_DEBUG: 
-    Serial.print("DEBUG:"); 
+    Serial.print("DEBUG: "); 
     break;
   default: 
-    Serial.print("UNKNOWN:"); 
+    Serial.print("UNKNOWN: "); 
     break;
   }
   Serial.println(buf);
@@ -521,10 +521,13 @@ void setup() {
   display.setMCPType(LTI_TYPE_MCP23017);
   display.begin(16, 2); 
 
-#if LOG_LEVEL > 0
+#if SERIAL_LOG_LEVEL > 0
   Serial.begin(SERIAL_BAUD_RATE);
+
 #endif
 
+  log(LOG_DEBUG, "Starting v%s", VERSION);
+  
   pinMode(INCOMING_PILOT_PIN, INPUT);
   pinMode(INCOMING_PROXIMITY_PIN, INPUT);
   pinMode(OUTGOING_PROXIMITY_PIN, OUTPUT);
@@ -562,11 +565,17 @@ void setup() {
   display.print(VERSION);
 
   boolean success = SetPinFrequency(CAR_A_PILOT_OUT_PIN, 1000);
-  if (!success) display.setBacklight(YELLOW);
+  if (!success) {
+    log(LOG_INFO, "SetPinFrequency for car A failed!");
+    display.setBacklight(YELLOW);
+  }
   success = SetPinFrequency(CAR_B_PILOT_OUT_PIN, 1000);
-  if (!success) display.setBacklight(BLUE);
+  if (!success) {
+    log(LOG_INFO, "SetPinFrequency for car B failed!");
+    display.setBacklight(BLUE);
+  }
   // In principle, neither of the above two !success conditions should ever
-  // happen. But if they do, a discolored splash screen is your clue.
+  // happen.
 
   // meanwhile, the fill in the incoming pilot rolling average...
   for(int i = 0; i < ROLLING_AVERAGE_SIZE; i++) {
