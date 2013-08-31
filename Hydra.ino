@@ -523,7 +523,6 @@ void setup() {
 
 #if SERIAL_LOG_LEVEL > 0
   Serial.begin(SERIAL_BAUD_RATE);
-
 #endif
 
   log(LOG_DEBUG, "Starting v%s", VERSION);
@@ -701,7 +700,7 @@ void loop() {
       break;
     }
   } else if (car_a_state != last_car_a_state && car_a_state != DUNNO) {
-    if (last_car_b_state != DUNNO)
+    if (last_car_a_state != DUNNO)
       log(LOG_INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
     last_car_a_state = car_a_state;
     switch(car_a_state) {
