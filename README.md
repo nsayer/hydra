@@ -47,6 +47,20 @@ If the incoming pilot either stops oscillating at 1 kHz, or if its duty cycle go
 current, then both cars will be errored out with an incoming pilot error. The minimum power is 12A, because
 the hydra must be able to divide that power by half, and 6A is the minimum allowable power per the J1772 spec.
 
+EV SIMULATOR
+------------
+
+It's been useful to me to be able to simulate an EV on occasion. This can be done rather simply with just an 882 ohm
+resistor and a 1N4148 diode in series, but I've also occasionally desired to analyze the outgoing pilot signal
+from an EVSE as well. Doing that requires either a dedicated piece of hardware or an oscilloscope.
+
+ATMega chips are pretty cheap and programming one to do the job of reporting the frequency and duty cycle of a
+J1772 pilot signal is pretty simple. The schematic, Eagle BRD and DigiKey BOM files for my homebrew EV simulator
+are available for download from the link below, and boards can be had from OSHPark. You can either power the
+board with a 5V wall wart and use the OpenEVSE LCD backpack to display the frequency, duty cycle, and amp
+rating or you can connect up a 5V FTDI cable to the board (which will also power the circuit) and watch the
+results get printed out.
+
 HARDWARE
 --------
 
