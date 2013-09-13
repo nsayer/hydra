@@ -17,14 +17,12 @@
  with this program; if not, write to the Free Software Foundation, Inc.,
  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
- 
-
 
 #include <Arduino.h>
 
-#define VERSION "0.2"
+#define VERSION "0.3"
 
-// PB1. 0 and 2 are i2c or serial, 3 & 4 is xtal, 5 is reset.
+// PB1. 0 and 2 are i2c or serial, 3 & 4 are xtal, 5 is reset.
 #define PILOT_DIGITAL_SAMPLING_PIN  1
 
 #define SAMPLE_PERIOD 1000
@@ -84,13 +82,14 @@ void setup() {
   display.print(VERSION);
   
   delay(2000);
+  display.clear();
 #endif
 }
 
 void loop() {
 
-  unsigned int last_state = LOW; // meh. If it's not, we'll be off by one
-  unsigned long high_count = 0, low_count = 0, state_changes = 0;
+  unsigned int last_state = 99; // neither HIGH nor LOW
+  unsigned long high_count = 0, low_count = 0, state_changes = -1; // ignore the first change from "invalid"
   
   for(unsigned long start_poll = millis(); millis() - start_poll < SAMPLE_PERIOD; ) {
     unsigned int state = digitalRead(PILOT_DIGITAL_SAMPLING_PIN);
@@ -105,16 +104,20 @@ void loop() {
       last_state = state;
     }
   }
-  
-  unsigned int duty = (high_count * 1000) / (high_count + low_count);
-  duty %= 1000; // turn 100% into 0% just for display purposes. A 100% duty cycle isn't really possible.
-  
-  unsigned long frequency = (state_changes / 2) * (1000 / SAMPLE_PERIOD);
-  
-  unsigned int amps = dutyToMA(duty);
-  
   char buf[32];
-  sprintf(buf, "%4ld Hz   %2d.%01d %%", frequency, duty / 10, duty % 10);
+  unsigned int amps = 0;
+  if (state_changes == 0) {
+    sprintf(buf, "   0 Hz     %s   ", (low_count>high_count)?"-":"+");
+  } else {
+    unsigned int duty = (high_count * 1000) / (high_count + low_count);
+    duty %= 1000; // turn 100% into 0% just for display purposes. A 100% duty cycle isn't really possible.
+  
+    unsigned long frequency = (state_changes / 2) * (1000 / SAMPLE_PERIOD);
+  
+    amps = dutyToMA(duty);
+  
+    sprintf(buf, "%4ld Hz   %2d.%01d %%", frequency, duty / 10, duty % 10);
+  }
 #if SERIAL_BAUD_RATE > 0
   serial.print(buf);
   serial.print(" ");
