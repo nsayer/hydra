@@ -185,7 +185,7 @@
 #define SERIAL_LOG_LEVEL LOG_INFO
 #define SERIAL_BAUD_RATE 9600
 
-#define VERSION "0.9.4.2 beta"
+#define VERSION "0.9.4.3 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -726,6 +726,8 @@ void loop() {
       if (car_a_error_time != 0) {
         car_a_error_time = 0;
         setRelay(CAR_A, LOW);
+        if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
+          setPilot(CAR_B, FULL);
       }
       break;
     }
@@ -805,6 +807,8 @@ void loop() {
       if (car_b_error_time != 0) {
         car_b_error_time = 0;
         setRelay(CAR_B, LOW);
+        if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
+          setPilot(CAR_A, FULL);
       }
       break;
     }
@@ -955,6 +959,8 @@ void loop() {
   if (car_a_error_time != 0 && now - car_a_error_time > ERROR_DELAY) {
     car_a_error_time = 0;
     setRelay(CAR_A, LOW);
+    if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
+        setPilot(CAR_B, FULL);
   }
   if (car_b_request_time != 0 && now - car_b_request_time > TRANSITION_DELAY) {
     // We've waited long enough.
@@ -966,6 +972,8 @@ void loop() {
   if (car_b_error_time != 0 && now - car_b_error_time > ERROR_DELAY) {
     car_b_error_time = 0;
     setRelay(CAR_B, LOW);
+    if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
+        setPilot(CAR_A, FULL);
   }
 }
 
