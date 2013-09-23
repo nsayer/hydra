@@ -20,31 +20,28 @@
 
 #include <Arduino.h>
 
-#define VERSION "0.3"
+#define VERSION "0.4"
 
 // PB1. 0 and 2 are i2c or serial, 3 & 4 are xtal, 5 is reset.
 #define PILOT_DIGITAL_SAMPLING_PIN  1
 
-#define SAMPLE_PERIOD 1000
+#define SAMPLE_PERIOD 500
 
-// Set this to 0 for i2c LCD or the SoftwareSerial baud rate to use
-#define SERIAL_BAUD_RATE 0
+// Set this to SoftwareSerial baud rate to use if the LCD is missing
+#define SERIAL_BAUD_RATE 9600
 
-#if SERIAL_BAUD_RATE > 0
 #include <SoftwareSerial.h>
 
 // SCK is the transmit pin, SDA is the receive pin.
 SoftwareSerial serial(0, 2);
 
-#else
 #include <TinyWireM.h>
 #include <LiquidTWI2.h>
 
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
 
+// Turn on auto-detect
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
-
-#endif
 
 // duty is tenths-of-a-percent (that is, fraction out of 1000).
 inline unsigned long dutyToMA(unsigned long duty) {
@@ -66,24 +63,24 @@ void setup() {
   
   pinMode(PILOT_DIGITAL_SAMPLING_PIN, INPUT);
     
-#if SERIAL_BAUD_RATE > 0
-  serial.begin(SERIAL_BAUD_RATE);
-  serial.print("EV Sim ");
-  serial.print(VERSION);
-  serial.print("\r\n");
-#else
   display.setMCPType(LTI_TYPE_MCP23017);
   display.begin(16, 2);
   
-  display.clear();
-  display.setBacklight(WHITE);
+  if (display.LcdDetected()) {
+    display.clear();
+    display.setBacklight(WHITE);
   
-  display.print("EV Sim ");
-  display.print(VERSION);
+    display.print("EV Sim ");
+    display.print(VERSION);
   
-  delay(2000);
-  display.clear();
-#endif
+    delay(2000);
+    display.clear();
+  } else {
+    serial.begin(SERIAL_BAUD_RATE);
+    serial.print("EV Sim ");
+    serial.print(VERSION);
+    serial.print("\r\n");
+  }
 }
 
 void loop() {
@@ -110,7 +107,7 @@ void loop() {
     sprintf(buf, "   0 Hz     %s   ", (low_count>high_count)?"-":"+");
   } else {
     unsigned int duty = (high_count * 1000) / (high_count + low_count);
-    duty %= 1000; // turn 100% into 0% just for display purposes. A 100% duty cycle isn't really possible.
+    duty %= 1000; // turn 100% into 0% just for display purposes. A 100% duty cycle doesn't really make sense.
   
     unsigned long frequency = (state_changes / 2) * (1000 / SAMPLE_PERIOD);
   
@@ -118,19 +115,20 @@ void loop() {
   
     sprintf(buf, "%4ld Hz   %2d.%01d %%", frequency, duty / 10, duty % 10);
   }
-#if SERIAL_BAUD_RATE > 0
-  serial.print(buf);
-  serial.print(" ");
-#else
-  display.setCursor(0, 0);
-  display.print(buf);
-#endif
+  if (display.LcdDetected()) {
+    display.setCursor(0, 0);
+    display.print(buf);
+  } else {
+    serial.print(buf);
+    serial.print(" ");
+  }
+
   sprintf(buf, "%2d.%02d A", amps / 1000, (amps % 1000) / 10);
-#if SERIAL_BAUD_RATE > 0
-  serial.print(buf);
-  serial.print("\r\n");
-#else
-  display.setCursor(0, 1);
-  display.print(buf);
-#endif
+  if (display.LcdDetected()) {
+    display.setCursor(0, 1);
+    display.print(buf);
+  } else {
+    serial.print(buf);
+    serial.print(" ");
+  }
 }
