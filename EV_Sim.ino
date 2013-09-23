@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define VERSION "0.4"
+#define VERSION "0.4.1"
 
 // PB1. 0 and 2 are i2c or serial, 3 & 4 are xtal, 5 is reset.
 #define PILOT_DIGITAL_SAMPLING_PIN  1
@@ -77,6 +77,8 @@ void setup() {
     display.clear();
   } else {
     serial.begin(SERIAL_BAUD_RATE);
+    delay(100);
+    serial.print("\r\n\r\n");
     serial.print("EV Sim ");
     serial.print(VERSION);
     serial.print("\r\n");
@@ -129,6 +131,6 @@ void loop() {
     display.print(buf);
   } else {
     serial.print(buf);
-    serial.print(" ");
+    serial.print("\r\n");
   }
 }
