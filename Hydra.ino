@@ -73,23 +73,19 @@
 // These are calculated from the expected voltages seen through the dividor network,
 // then scaling those voltages for 0-1024.
 
-// 11 volts
-#define STATE_A_MIN      900
-// 10 volts
-#define STATE_B_MAX      868
-// 8 volts
-#define STATE_B_MIN      799
-// 7 volts
+
+#define STATE_A_MIN      870
+
+#define STATE_B_MAX      869
+#define STATE_B_MIN      775
+
 #define STATE_C_MAX      774
-// 5 volts
-#define STATE_C_MIN      712
-// 4 volts
+#define STATE_C_MIN      682
+
 #define STATE_D_MAX      681
-// 2 volts
-#define STATE_D_MIN      618
-// This represents 0 volts. No, it's not 512. Deal.
+#define STATE_D_MIN      610
+
 #define PILOT_0V         556
-// -10 volts. We're fairly generous.
 #define PILOT_DIODE_MAX  250
 
 // This is the amount the incoming pilot needs to change for us to react (in milliamps).
@@ -177,6 +173,7 @@
 #define LOG_NONE 0
 #define LOG_INFO 1
 #define LOG_DEBUG 2
+#define LOG_TRACE 3
 
 // Hardware versions 1.0 and beyond have a 6 pin FTDI compatible port laid out on the board.
 // We're going to use this sort of "log4j" style. The log level is 0 for no logging at all
@@ -185,7 +182,7 @@
 #define SERIAL_LOG_LEVEL LOG_INFO
 #define SERIAL_BAUD_RATE 9600
 
-#define VERSION "0.9.4.3 beta"
+#define VERSION "0.9.4.4 beta"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -216,6 +213,9 @@ void log(unsigned int level, const char * fmt_str, ...) {
     break;
   case LOG_DEBUG: 
     Serial.print("DEBUG: "); 
+    break;
+  case LOG_TRACE:
+    Serial.print("TRACE: ");
     break;
   default: 
     Serial.print("UNKNOWN: "); 
@@ -439,6 +439,8 @@ int checkState(unsigned int car) {
     if (val < low) low = val;
   }
 
+  log(LOG_TRACE, "%s high %ud low %ud", car_str(car), high, low);
+  
   // If the pilot low was below zero, then that means we must have
   // been oscillating. If we were, then perform the diode check.
   if (low < PILOT_0V && low > PILOT_DIODE_MAX) {
