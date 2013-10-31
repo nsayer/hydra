@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define VERSION "0.4.2"
+#define VERSION "0.4.3"
 
 // PB1. 0 and 2 are i2c or serial, 3 & 4 are xtal, 5 is reset.
 #define PILOT_DIGITAL_SAMPLING_PIN  1
@@ -108,7 +108,7 @@ void loop() {
     }
   }
   char buf[32];
-  unsigned int amps = 0;
+  unsigned long amps = 0;
   if (state_changes == 0) {
     sprintf(buf, "   0 Hz     %s   ", (low_count>high_count)?"-":"+");
   } else {
