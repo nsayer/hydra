@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define VERSION "0.4.1"
+#define VERSION "0.4.2"
 
 // PB1. 0 and 2 are i2c or serial, 3 & 4 are xtal, 5 is reset.
 #define PILOT_DIGITAL_SAMPLING_PIN  1
@@ -29,6 +29,10 @@
 
 // Set this to SoftwareSerial baud rate to use if the LCD is missing
 #define SERIAL_BAUD_RATE 9600
+
+// Pick one of the following two.
+#define MCP_TYPE LTI_TYPE_MCP23017 // for RGB shields
+//#define MCP_TYPE LTI_TYPE_MCP23008 // for the older Adafruit backpack
 
 #include <SoftwareSerial.h>
 
@@ -48,11 +52,11 @@ inline unsigned long dutyToMA(unsigned long duty) {
   if (duty < 100) { // < 10% is an error
     return 0;
   } 
-  else if (duty < 850) { // 10-85% uses the "low" function
-    return (int)((duty) * 60);
+  else if (duty <= 850) { // 10-85% uses the "low" function
+    return duty * 60;
   } 
   else if (duty <= 960) { // 85-96% uses the "high" function
-    return (int)((duty - 640) * 250);
+    return (duty - 640) * 250;
   } 
   else { // > 96% is an error
     return 0;
@@ -63,7 +67,7 @@ void setup() {
   
   pinMode(PILOT_DIGITAL_SAMPLING_PIN, INPUT);
     
-  display.setMCPType(LTI_TYPE_MCP23017);
+  display.setMCPType(MCP_TYPE);
   display.begin(16, 2);
   
   if (display.LcdDetected()) {
