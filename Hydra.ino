@@ -73,19 +73,23 @@
 // These are calculated from the expected voltages seen through the dividor network,
 // then scaling those voltages for 0-1024.
 
-
+// 11 volts
 #define STATE_A_MIN      870
-
+// 10 volts
 #define STATE_B_MAX      869
+// 8 volts
 #define STATE_B_MIN      775
-
+// 7 volts
 #define STATE_C_MAX      774
+// 5 volts
 #define STATE_C_MIN      682
-
+// 4 volts
 #define STATE_D_MAX      681
+// 2 volts
 #define STATE_D_MIN      610
-
+// This represents 0 volts. No, it's not 512. Deal.
 #define PILOT_0V         556
+// -10 volts. We're fairly generous.
 #define PILOT_DIODE_MAX  250
 
 // This is the amount the incoming pilot needs to change for us to react (in milliamps).
@@ -182,7 +186,7 @@
 #define SERIAL_LOG_LEVEL LOG_INFO
 #define SERIAL_BAUD_RATE 9600
 
-#define VERSION "0.9.4.4 beta"
+#define VERSION "0.9.5"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -273,10 +277,10 @@ inline unsigned long timeToMA(unsigned long msecHigh, unsigned long msecLow) {
     return 0;
   } 
   else if (msec < 850) { // 10-85% uses the "low" function
-    return (int)((msec) * 60);
+    return msec * 60;
   } 
   else if (msec <= 960) { // 85-96% uses the "high" function
-    return (int)((msec - 640) * 250);
+    return (msec - 640) * 250;
   } 
   else { // > 96% is an error
     return 0;
