@@ -131,20 +131,20 @@
 #define INLET_CURRENT_DERATE 0
 
 // Amount of time, in milliseconds, we will analyse the duty cycle of the incoming pilot
-// Default is 500 cycles. We're doing a digitalRead(), so this will be thousands of samples.
-#define PILOT_POLL_INTERVAL 50
+// Default is 200 cycles. We're doing a digitalRead(), so this will be thousands of samples.
+#define PILOT_POLL_INTERVAL 25
 
 // Amount of time, in milliseconds, we will look for positive and negative peaks on the car
-// pilot pins. It takes around .1 ms to do one read, so we should get a bit less than 1000 chances
+// pilot pins. It takes around .1 ms to do one read, so we should get a bit less than 200 chances
 // this way.
-#define STATE_CHECK_INTERVAL 100
+#define STATE_CHECK_INTERVAL 20
 
 // How often (in milliseconds) is the state of both cars logged?
 #define STATE_LOG_INTERVAL 60000
 
 // This is the number of duty cycle or ammeter samples we keep to make a rolling average to stabilize
 // the display. The balance here is between stability and responsiveness,
-#define ROLLING_AVERAGE_SIZE 5
+#define ROLLING_AVERAGE_SIZE 10
 
 // The maximum number of milliseconds to sample an ammeter pin in order to find three zero-crossings.
 // one and a half cycles at 50 Hz is 30 ms.
@@ -186,7 +186,31 @@
 #define SERIAL_LOG_LEVEL LOG_INFO
 #define SERIAL_BAUD_RATE 9600
 
-#define VERSION "0.9.5"
+// in shared mode, two cars connected simultaneously will get 50% of the incoming pilot
+#define MODE_SHARED 0
+// in sequential mode, the first car to enter state B gets the pilot until it transitions
+// from C/D to B again. When it does, if the other car is in state B1, then it will be given
+// a pilot.
+#define MODE_SEQUENTIAL 1
+
+// If we add more modes, set this to the highest numbered one.
+#define LAST_MODE MODE_SEQUENTIAL
+
+// Set this to the desired startup mode
+#define DEFAULT_MODE MODE_SHARED
+
+// Which button do we use?
+#define BUTTON BUTTON_SELECT
+// If we see any state change on the button, we ignore all changes for this long
+#define BUTTON_DEBOUNCE_INTERVAL 50
+// How long does the button have to stay down before we call it a LONG push?
+#define BUTTON_LONG_START 250
+
+#define EVENT_NONE 0
+#define EVENT_SHORT_PUSH 1
+#define EVENT_LONG_PUSH 2
+
+#define VERSION "1.0 Beta 1"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -199,13 +223,14 @@ unsigned long car_a_request_time, car_b_request_time;
 unsigned long car_a_error_time, car_b_error_time;
 unsigned long last_current_log_car_a, last_current_log_car_b;
 unsigned long last_state_log;
-unsigned int relay_state_a, relay_state_b;
-unsigned int lastProximity;
+unsigned int relay_state_a, relay_state_b, pilot_state_a, pilot_state_b;
+unsigned int lastProximity, operatingMode;
+unsigned long button_press_time, button_debounce_time;
 
 void log(unsigned int level, const char * fmt_str, ...) {
 #if SERIAL_LOG_LEVEL > 0
   if (level > SERIAL_LOG_LEVEL) return;
-  char buf[256]; // Danger, Will Robinson!
+  char buf[64]; // Danger, Will Robinson!
   va_list argptr;
   va_start(argptr, fmt_str);
   vsnprintf(buf, sizeof(buf), fmt_str, argptr);
@@ -219,7 +244,8 @@ void log(unsigned int level, const char * fmt_str, ...) {
     Serial.print("DEBUG: "); 
     break;
   case LOG_TRACE:
-    Serial.print("TRACE: ");
+    Serial.print(millis());
+    Serial.print(" TRACE: ");
     break;
   default: 
     Serial.print("UNKNOWN: "); 
@@ -269,18 +295,17 @@ inline const char* state_str(unsigned int state) {
 // Convert the microsecond state timings from the incoming pilot into
 // an instantaneous current allowance value. With polling, it's
 // the two sample counts, but the math winds up being exactly the same.
-inline unsigned long timeToMA(unsigned long msecHigh, unsigned long msecLow) {
-  // First, normalize the frequency to 1000 Hz.
-  // msec is the number of microseconds out of 1000 that the signal stayed high
-  long msec = (msecHigh * 1000) / (msecHigh + msecLow);
-  if (msec < 100) { // < 10% is an error
+inline unsigned long timeToMA(unsigned long samplesHigh, unsigned long samplesLow) {
+  // Calculate the duty cycle in mils (tenths of a percent)
+  unsigned int duty = (samplesHigh * 1000) / (samplesHigh + samplesLow);
+  if (duty < 100) { // < 10% is an error
     return 0;
   } 
-  else if (msec < 850) { // 10-85% uses the "low" function
-    return msec * 60;
+  else if (duty <= 850) { // 10-85% uses the "low" function
+    return duty * 60L;
   } 
-  else if (msec <= 960) { // 85-96% uses the "high" function
-    return (msec - 640) * 250;
+  else if (duty <= 960) { // 85-96% uses the "high" function
+    return (duty - 640) * 250L;
   } 
   else { // > 96% is an error
     return 0;
@@ -288,8 +313,8 @@ inline unsigned long timeToMA(unsigned long msecHigh, unsigned long msecLow) {
 }
 
 // Convert a milliamp allowance into an outgoing pilot duty cycle.
-// In lieu of floating point, this is microseconds high out of 1000.
-inline unsigned long MAToMsec(unsigned long milliamps) {
+// In lieu of floating point, this is duty in mils (tenths of a percent)
+inline static unsigned int MAToDuty(unsigned long milliamps) {
   if (milliamps < 6000) {
     return 9999; // illegal - set pilot to "high"
   } 
@@ -306,14 +331,14 @@ inline unsigned long MAToMsec(unsigned long milliamps) {
 
 // Convert a milliamp allowance into a value suitable for
 // pwmWrite - a scale from 0 to 255.
-inline unsigned int MAtoPwm(unsigned long milliamps) {
-  unsigned long out = MAToMsec(milliamps);
+inline static unsigned int MAtoPwm(unsigned long milliamps) {
+  unsigned int out = MAToDuty(milliamps);
 
   if (out >= 1000) return 255; // full on
 
-  out =  (out * 256) / 1000;  
+  out = (unsigned int)((out * 256L) / 1000);  
 
-  return (unsigned int)out;
+  return out;
 }
 
 // Turn a millamp value into nn.n as amps, with the tenth rounded near.
@@ -420,30 +445,50 @@ inline boolean isCarCharging(unsigned int car) {
 void setPilot(unsigned int car, unsigned int which) {
   log(LOG_DEBUG, "Setting %s pilot to %s", car_str(car), logic_str(which));
   // set the outgoing pilot for the given car to either HALF state, FULL state, or HIGH.
-  int pin = (car == CAR_A) ? CAR_A_PILOT_OUT_PIN : CAR_B_PILOT_OUT_PIN;
+  int pin;
+  switch(car) {
+    case CAR_A:
+      pin = CAR_A_PILOT_OUT_PIN;
+      pilot_state_a = which;
+      break;
+    case CAR_B:
+      pin = CAR_B_PILOT_OUT_PIN;
+      pilot_state_b = which;
+      break;
+    default: return;
+  }
   if (which == LOW || which == HIGH) {
     // This is what the pwm library does anyway.
+    log(LOG_TRACE, "Pin %d to digital %d", pin, which);
     digitalWrite(pin, which);
   } 
   else {
     unsigned long ma = incomingPilotMilliamps;
     if (which == HALF) ma /= 2;
     if (ma > MAXIMUM_OUTLET_CURRENT) ma = MAXIMUM_OUTLET_CURRENT;
-    pwmWrite(pin, MAtoPwm(ma));
+    unsigned int val = MAtoPwm(ma);
+    log(LOG_TRACE, "Pin %d to PWM %d", pin, val);
+    pwmWrite(pin, val);
   }
+}
+
+inline static unsigned int pilotState(unsigned int car) {
+  return (car == CAR_A)?pilot_state_a:pilot_state_b;
 }
 
 int checkState(unsigned int car) {
   // poll the pilot state pin for 10 ms (should be 10 pilot cycles), looking for the low and high.
   unsigned int low = 9999, high = 0;
   unsigned int car_pin = (car == CAR_A) ? CAR_A_PILOT_SENSE_PIN : CAR_B_PILOT_SENSE_PIN;
-  for(unsigned long now = millis(); millis() - now < STATE_CHECK_INTERVAL; ) {
+  unsigned long count = 0;
+  for(unsigned long start = millis(); millis() - start < STATE_CHECK_INTERVAL; ) {
     unsigned int val = analogRead(car_pin);
     if (val > high) high = val;
     if (val < low) low = val;
+    count++;
   }
 
-  log(LOG_TRACE, "%s high %ud low %ud", car_str(car), high, low);
+  log(LOG_TRACE, "%s high %u low %u count %lu", car_str(car), high, low, count);
   
   // If the pilot low was below zero, then that means we must have
   // been oscillating. If we were, then perform the diode check.
@@ -532,16 +577,16 @@ inline void reportIncomingPilot(unsigned long milliamps) {
 }
 
 void pollIncomingPilot() {
-  unsigned long now = millis();
   unsigned long high_count = 0, low_count = 0;
-  while(millis() - now < PILOT_POLL_INTERVAL) {
-    if (digitalRead(INCOMING_PILOT_PIN) == HIGH) high_count++;
+  for(unsigned long start = millis(); millis() - start < PILOT_POLL_INTERVAL; ) {
+    if (digitalRead(INCOMING_PILOT_PIN) == HIGH)
+      high_count++;
     else
       low_count++;
   }
 
   if (high_count == 0 && low_count == 0) {
-    // Something has gone wrong. We'll just assume a limit of 0
+    // Something impossible has happened. We'll just assume a limit of 0
     // to avoid divide-by-zero later.
     reportIncomingPilot(0);
     return;
@@ -550,6 +595,176 @@ void pollIncomingPilot() {
 
   reportIncomingPilot(milliamps);
 
+}
+
+void sequential_mode_transition(unsigned int us, unsigned int car_state) {
+  unsigned int them = (us == CAR_A)?CAR_B:CAR_A;
+  unsigned int *last_car_state = (us == CAR_A)?&last_car_a_state:&last_car_b_state;
+  unsigned int their_state = (us == CAR_A)?last_car_b_state:last_car_a_state;
+  
+  switch(car_state) {
+    case STATE_A:
+      // No matter what, insure that the pilot and relay are off.
+      setRelay(us, LOW);
+      setPilot(us, HIGH);
+      // We don't exist. If they're waiting, they can have it.
+      if (their_state == STATE_B)
+      {
+          setPilot(them, FULL);
+          display.setCursor((them == CAR_A)?0:8, 1);
+          display.print((them == CAR_A)?"A":"B");
+          display.print(": off  ");
+      }
+      display.setCursor((us == CAR_A)?0:8, 1);
+      display.print((us == CAR_A)?"A":"B");
+      display.print(": ---  ");
+      break;
+    case STATE_B:
+      // No matter what, insure that the relay is off.
+      setRelay(us, LOW);
+      if (*last_car_state == STATE_C || *last_car_state == STATE_D) {
+        // We transitioned from C/D to B. That means we're passing the batton
+        // to the other car, if they want it.
+        if (their_state == STATE_B) {
+          setPilot(them, FULL);
+          setPilot(us, HIGH);
+          display.setCursor((them == CAR_A)?0:8, 1);
+          display.print((them == CAR_A)?"A":"B");
+          display.print(": off  ");
+          display.setCursor((us == CAR_A)?0:8, 1);
+          display.print((us == CAR_A)?"A":"B");
+          display.print(": wait ");
+        } else {
+          display.setCursor((us == CAR_A)?0:8, 1);
+          display.print((us == CAR_A)?"A":"B");
+          display.print(": off  ");
+        }
+      } else {
+        if (their_state == STATE_A || their_state == DUNNO) {
+          // We can only grab the batton if they're not plugged in at all.
+          setPilot(us, FULL);
+          display.setCursor((us == CAR_A)?0:8, 1);
+          display.print((us == CAR_A)?"A":"B");
+          display.print(": off  ");
+        } else {
+          display.setCursor((us == CAR_A)?0:8, 1);
+          display.print((us == CAR_A)?"A":"B");
+          display.print(": wait ");
+        }
+      }
+      break;
+    case STATE_C:
+    case STATE_D:
+      if (isCarCharging(us)) {
+        // we're already charging. This might be a flip from C to D. Ignore it.
+        break;
+      }
+      if (pilotState(us) != FULL) {
+        error(us, 'T'); // illegal transition: no state C without a pilot
+        return;
+      }
+      setRelay(us, HIGH); // turn on the juice
+      display.setCursor((us == CAR_A)?0:8, 1);
+      display.print((us == CAR_A)?"A":"B");
+      display.print(": ON   ");
+      break;
+    case STATE_E:
+      error(us, 'E');
+      return;
+  }
+  *last_car_state = car_state;
+}
+
+void shared_mode_transition(unsigned int us, unsigned int car_state) {
+  unsigned int them = (us == CAR_A)?CAR_B:CAR_A;
+  unsigned int *last_car_state = (us == CAR_A)?&last_car_a_state:&last_car_b_state;
+  unsigned long *car_request_time = (us == CAR_A)?&car_a_request_time:&car_b_request_time;
+    
+  *last_car_state = car_state;    
+  switch(car_state) {
+    case STATE_A:
+    case STATE_B:
+      // We're in an "off" state of one sort or other.
+      // In either case, clear any connection delay timer,
+      // make sure the relay is off, and set the diplay
+      // appropriately. For state A, set our pilot high,
+      // and fot state B, set it to half if the other car
+      // is charging, full otherwise.
+      setRelay(us, LOW);
+      setPilot(us, car_state == STATE_A ? HIGH : (isCarCharging(them)?HALF:FULL));
+      display.setCursor((us == CAR_A)?0:8, 1);
+      display.print((us == CAR_A)?"A":"B");
+      display.print(car_state == STATE_A ? ": ---  " : ": off  ");
+      *car_request_time = 0;
+      if (pilotState(them) == HALF)
+        setPilot(them, FULL);
+      break;
+    case STATE_C:
+    case STATE_D:
+      if (isCarCharging(us)) {
+        // we're already charging. This might be a flip from C to D. Ignore it.
+        break;
+      }
+      if (isCarCharging(them)) {
+        // if they are charging, we must transition them.
+        *car_request_time = millis();
+        // Drop car A down to 50%
+        setPilot(them, HALF);
+        display.setCursor((us == CAR_A)?0:8, 1);
+        display.print((us == CAR_A)?"A":"B");
+        display.print(": wait ");
+      } else {
+        // if they're not charging, then we can just go. If they have a full pilot, they get downshifted.
+        if (pilotState(them) == FULL)
+          setPilot(them, HALF);
+        setPilot(us, FULL);
+        setRelay(us, HIGH);
+        *car_request_time = 0;
+        display.setCursor((us == CAR_A)?0:8, 1);
+        display.print((us == CAR_A)?"A":"B");
+        display.print(": ON   ");
+      }
+      break;
+    case STATE_E:
+      error(us, 'E');
+      break;
+  }
+}
+
+unsigned int checkEvent() {
+  log(LOG_TRACE, "Checking for button event");
+  if (button_debounce_time != 0 && millis() - button_debounce_time < BUTTON_DEBOUNCE_INTERVAL) {
+    // debounce is in progress
+    return EVENT_NONE;
+  } else {
+    // debounce is over
+    button_debounce_time = 0;
+  }
+  unsigned int buttons = display.readButtons();
+  log(LOG_TRACE, "Buttons %d", buttons);
+  if ((buttons & BUTTON) != 0) {
+    log(LOG_TRACE, "Button is down");
+    // Button is down
+    if (button_press_time == 0) { // this is the start of a press.
+      button_debounce_time = button_press_time = millis();
+    }
+    return EVENT_NONE; // We don't know what this button-push is going to be yet
+  } else {
+    log(LOG_TRACE, "Button is up");
+    // Button released
+    if (button_press_time == 0) return EVENT_NONE; // It wasn't down anyway.
+    // We are now ending a button-push. First, start debuncing.
+    button_debounce_time = millis();
+    unsigned long button_pushed_time = button_debounce_time - button_press_time;
+    button_press_time = 0;
+    if (button_pushed_time > BUTTON_LONG_START) {
+      log(LOG_DEBUG, "Button long-push event");
+      return EVENT_LONG_PUSH;
+    } else {
+      log(LOG_DEBUG, "Button short-push event");
+      return EVENT_SHORT_PUSH;
+    }
+  }
 }
 
 void setup() {
@@ -591,6 +806,9 @@ void setup() {
   last_current_log_car_a = 0;
   last_current_log_car_b = 0;
   lastProximity = HIGH;
+  operatingMode = DEFAULT_MODE;
+  button_debounce_time = 0;
+  button_press_time = 0;
 
   display.setBacklight(WHITE);
   display.clear();
@@ -627,7 +845,6 @@ void setup() {
 void loop() {
 
   // cut down on how frequently we call millis()
-  unsigned long now = millis();
   boolean proximityOrPilotError = false;
   
   // Update the display
@@ -665,6 +882,9 @@ void loop() {
     } 
     else {
       log(LOG_INFO, "Incoming proximity restore");
+      // Clear out "Disconnecting..."
+      display.setCursor(0, 0);
+      display.print("                ");
       
       // In case someone pushed the button and changed their mind
       digitalWrite(OUTGOING_PROXIMITY_PIN, LOW);
@@ -677,8 +897,9 @@ void loop() {
   pollIncomingPilot();
   if (incomingPilotMilliamps < MINIMUM_INLET_CURRENT) {
     if (last_car_a_state != STATE_E || last_car_b_state != STATE_E) { 
+      log(LOG_INFO, "Incoming pilot error");
       display.setCursor(0, 0);
-      display.print("INPUT PILOT ERR ");
+      display.print("I:ERROR ");
       error(BOTH, 'I');
     }
     // Forget it. Nothing else is worth doing as long as the input pilot continues to be gone.
@@ -687,25 +908,31 @@ void loop() {
 
   if(!proximityOrPilotError) {
     display.setCursor(0, 0);
-    display.print("EVSE power ");
+    display.print("I:");
     display.print(formatMilliamps(incomingPilotMilliamps));
+    display.setCursor(8, 0);
+    display.print("M:");
+    switch(operatingMode) {
+      case MODE_SHARED:
+        display.print("shared"); break;
+      case MODE_SEQUENTIAL:
+        display.print("seqntl"); break;
+      default:
+        display.print("UNK"); break;
+    }
   }
 
   // Adjust the pilot levels to follow any changes in the incoming pilot
-  if (abs(incomingPilotMilliamps - lastIncomingPilot) > PILOT_FUZZ) {
-    switch(last_car_a_state) {
-    case STATE_B:
-    case STATE_C:
-    case STATE_D:
-      setPilot(CAR_A, isCarCharging(CAR_B)?HALF:FULL);
-      break;
+  unsigned long fuzz = labs(incomingPilotMilliamps - lastIncomingPilot);
+  if (fuzz > PILOT_FUZZ) {
+    log(LOG_INFO, "Detected incoming pilot fuzz of %lu mA", fuzz);
+    switch(pilot_state_a) {
+      case HALF: setPilot(CAR_A, HALF); break;
+      case FULL: setPilot(CAR_A, FULL); break;
     }
-    switch(last_car_b_state) {
-    case STATE_B:
-    case STATE_C:
-    case STATE_D:
-      setPilot(CAR_B, isCarCharging(CAR_A)?HALF:FULL);
-      break;
+    switch(pilot_state_b) {
+      case HALF: setPilot(CAR_B, HALF); break;
+      case FULL: setPilot(CAR_B, FULL); break;
     }
     lastIncomingPilot = incomingPilotMilliamps;
   }
@@ -740,56 +967,13 @@ void loop() {
   } else if (car_a_state != last_car_a_state) {
     if (last_car_a_state != DUNNO)
       log(LOG_INFO, "Car A state transition: %s->%s.", state_str(last_car_a_state), state_str(car_a_state));
-    last_car_a_state = car_a_state;
-    switch(car_a_state) {
-    case STATE_A:
-    case STATE_B:
-      // We're in an "off" state of one sort or other.
-      // In either case, clear any connection delay timer,
-      // make sure the relay is off, and set the diplay
-      // appropriately. For state A, set our pilot high,
-      // and fot state B, set it to half if the other car
-      // is charging, full otherwise.
-      setRelay(CAR_A, LOW);
-      setPilot(CAR_A, car_a_state == STATE_A ? HIGH : (isCarCharging(CAR_B)?HALF:FULL));
-      display.setCursor(0, 1);
-      display.print(car_a_state == STATE_A ? "A: ---  " : "A: off  ");
-      car_a_request_time = 0;
-      if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
-        setPilot(CAR_B, FULL);
-      break;
-    case STATE_C:
-    case STATE_D: // We don't care about vent requirements.
-      // We're in an "on" state.
-      if (isCarCharging(CAR_A)) {
-        // we're already charging. This might be a flip from C to D. Ignore it.
+    switch(operatingMode) {
+      case MODE_SHARED:
+        shared_mode_transition(CAR_A, car_a_state);
         break;
-      }
-      if (isCarCharging(CAR_B)) {
-        // if car B is charging, we must wait while we transition them.
-        car_a_request_time = now;
-        // Drop car B down to 50%
-        setPilot(CAR_B, HALF);
-        display.setCursor(0, 1);
-        display.print("A: wait ");
-      } 
-      else {
-        // Car B is not charging. We can just turn our own power on immediately.
-        // The only way they have a pilot now is if they're in state B, so if they are,
-        // switch them to a half pilot.
-        // If they turn on, they'll be forced to wait the transition period after reducing
-        // our pilot, which will coincidently give them a taste of half power
-        // before their relay gets turned on.
-        setPilot(CAR_A, FULL);
-        if (last_car_b_state == STATE_B)
-          setPilot(CAR_B, HALF);
-        setRelay(CAR_A, HIGH);
-        car_a_request_time = 0;
-      }
-      break;
-    case STATE_E:
-      error(CAR_A, 'E');
-      break;
+      case MODE_SEQUENTIAL:
+        sequential_mode_transition(CAR_A, car_a_state);
+        break;
     }
   }
 
@@ -821,56 +1005,23 @@ void loop() {
   } else if (car_b_state != last_car_b_state) {
     if (last_car_b_state != DUNNO)
       log(LOG_INFO, "Car B state transition: %s->%s.", state_str(last_car_b_state), state_str(car_b_state));
-    last_car_b_state = car_b_state;    
-    switch(car_b_state) {
-    case STATE_A:
-    case STATE_B:
-      // We're in an "off" state of one sort or other.
-      // In either case, clear any connection delay timer,
-      // make sure the relay is off, and set the diplay
-      // appropriately. For state A, set our pilot high,
-      // and fot state B, set it to half if the other car
-      // is charging, full otherwise.
-      setRelay(CAR_B, LOW);
-      setPilot(CAR_B, car_b_state == STATE_A ? HIGH : (isCarCharging(CAR_A)?HALF:FULL));
-      display.setCursor(8, 1);
-      display.print(car_b_state == STATE_A ? "B: ---  " : "B: off  ");
-      car_b_request_time = 0;
-      if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
-        setPilot(CAR_A, FULL);
-      break;
-    case STATE_C:
-    case STATE_D:
-      if (isCarCharging(CAR_B)) {
-        // we're already charging. This might be a flip from C to D. Ignore it.
+    switch(operatingMode) {
+      case MODE_SHARED:
+        shared_mode_transition(CAR_B, car_b_state);
         break;
-      }
-      if (isCarCharging(CAR_A)) {
-        // if car A is charging, we must transition them.
-        car_b_request_time = now;
-        // Drop car A down to 50%
-        setPilot(CAR_A, HALF);
-        display.setCursor(8, 1);
-        display.print("B: wait ");
-      } 
-      else {
-        setPilot(CAR_B, FULL);
-        if (last_car_a_state == STATE_B)
-          setPilot(CAR_A, HALF);
-        setRelay(CAR_B, HIGH);
-        car_b_request_time = 0;
-      }
-      break;
-    case STATE_E:
-      error(CAR_B, 'E');
-      break;
+      case MODE_SEQUENTIAL:
+        sequential_mode_transition(CAR_B, car_b_state);
+        break;
     }
   }
   
-  if (now - last_state_log > STATE_LOG_INTERVAL) {
-    last_state_log = now;
-    log(LOG_INFO, "States: Car A, %s; Car B, %s", state_str(last_car_a_state), state_str(last_car_b_state));
-    log(LOG_INFO, "Incoming pilot %s", formatMilliamps(incomingPilotMilliamps));
+  {
+    unsigned long now = millis();
+    if (now - last_state_log > STATE_LOG_INTERVAL) {
+      last_state_log = now;
+      log(LOG_INFO, "States: Car A, %s; Car B, %s", state_str(last_car_a_state), state_str(last_car_b_state));
+      log(LOG_INFO, "Incoming pilot %s", formatMilliamps(incomingPilotMilliamps));
+    }
   }
    
   // Update the ammeter display and check for overdraw conditions.
@@ -885,21 +1036,24 @@ void loop() {
   if (isCarCharging(CAR_A) && car_a_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
     unsigned long car_a_draw = readCurrent(CAR_A);
 
-    if (now - last_current_log_car_a > CURRENT_LOG_INTERVAL) {
-      last_current_log_car_a = now;
-      log(LOG_INFO, "Car A current draw %lu mA", car_a_draw);
+    {
+      unsigned long now = millis();
+      if (now - last_current_log_car_a > CURRENT_LOG_INTERVAL) {
+        last_current_log_car_a = now;
+        log(LOG_INFO, "Car A current draw %lu mA", car_a_draw);
+      }
     }
     
     // If the other car is charging, then we can only have half power
-    unsigned long car_a_limit = incomingPilotMilliamps / (isCarCharging(CAR_B) ? 2 : 1);
+    unsigned long car_a_limit = incomingPilotMilliamps / ((pilotState(CAR_A) == HALF)? 2 : 1);
 
     if (car_a_draw > car_a_limit + OVERDRAW_GRACE_AMPS) {
       // car A has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
       if (car_a_overdraw_begin == 0) {
-        car_a_overdraw_begin = now;
+        car_a_overdraw_begin = millis();
       } 
       else {
-        if (now - car_a_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
+        if (millis() - car_a_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
           error(CAR_A, 'O');
           return;
         }
@@ -922,21 +1076,24 @@ void loop() {
   if (isCarCharging(CAR_B) && car_b_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
     unsigned long car_b_draw = readCurrent(CAR_B);
 
-    if (now - last_current_log_car_b > CURRENT_LOG_INTERVAL) {
-      last_current_log_car_b = now;
-      log(LOG_INFO, "Car B current draw %lu mA", car_b_draw);
+    {
+      unsigned long now = millis();
+      if (now - last_current_log_car_b > CURRENT_LOG_INTERVAL) {
+        last_current_log_car_b = now;
+        log(LOG_INFO, "Car B current draw %lu mA", car_b_draw);
+      }
     }
     
     // If the other car is charging, then we can only have half power
-    unsigned long car_b_limit = incomingPilotMilliamps / (isCarCharging(CAR_A) ? 2 : 1);
+    unsigned long car_b_limit = incomingPilotMilliamps / ((pilotState(CAR_B) == HALF) ? 2 : 1);
 
     if (car_b_draw > car_b_limit + OVERDRAW_GRACE_AMPS) {
       // car B has begun an over-draw condition. They have 5 seconds of grace before we pull the plug.
       if (car_b_overdraw_begin == 0) {
-        car_b_overdraw_begin = now;
+        car_b_overdraw_begin = millis();
       } 
       else {
-        if (now - car_b_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
+        if (millis() - car_b_overdraw_begin > OVERDRAW_GRACE_PERIOD) {
           error(CAR_B, 'O');
           return;
         }
@@ -955,32 +1112,55 @@ void loop() {
     memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
   }
 
-  if (car_a_request_time != 0 && now - car_a_request_time > TRANSITION_DELAY) {
+  // We need to use labs() here because we cached now early on, so it may actually be
+  // *before* the time in question
+  if (car_a_request_time != 0 && (millis() - car_a_request_time) > TRANSITION_DELAY) {
     // We've waited long enough.
+    log(LOG_INFO, "Delayed transition completed on car A");
     car_a_request_time = 0;
     setRelay(CAR_A, HIGH);
     display.setCursor(0, 1);
     display.print("A: ON   ");
   }
-  if (car_a_error_time != 0 && now - car_a_error_time > ERROR_DELAY) {
+  if (car_a_error_time != 0 && (millis() - car_a_error_time) > ERROR_DELAY) {
+    log(LOG_INFO, "Power withdrawn after error delay on car A");
     car_a_error_time = 0;
     setRelay(CAR_A, LOW);
     if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
         setPilot(CAR_B, FULL);
   }
-  if (car_b_request_time != 0 && now - car_b_request_time > TRANSITION_DELAY) {
+  if (car_b_request_time != 0 && (millis() - car_b_request_time) > TRANSITION_DELAY) {
+    log(LOG_INFO, "Delayed transition completed on car B");
     // We've waited long enough.
     car_b_request_time = 0;
     setRelay(CAR_B, HIGH);
     display.setCursor(8, 1);
     display.print("B: ON   ");
   }
-  if (car_b_error_time != 0 && now - car_b_error_time > ERROR_DELAY) {
+  if (car_b_error_time != 0 && (millis() - car_b_error_time) > ERROR_DELAY) {
+    log(LOG_INFO, "Power withdrawn after error delay on car B");
     car_b_error_time = 0;
     setRelay(CAR_B, LOW);
     if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
         setPilot(CAR_A, FULL);
   }
+  
+  if (car_a_state == STATE_A && car_b_state == STATE_A) {
+    // Allow playing with the menu button only when both plugs are out
+    unsigned int event = checkEvent();
+    if (event == EVENT_SHORT_PUSH || event == EVENT_LONG_PUSH) {
+      operatingMode++;
+      if (operatingMode > LAST_MODE) operatingMode = 0;
+      const char *modeStr;
+      switch(operatingMode) {
+        case MODE_SEQUENTIAL: modeStr = "sequential"; break;
+        case MODE_SHARED: modeStr = "shared"; break;
+        default: modeStr = "UNKNOWN";
+      }
+      log(LOG_INFO, "Changing operating mode to %s", modeStr);
+    }
+  }
+  
 }
 
 
