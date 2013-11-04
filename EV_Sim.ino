@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define VERSION "0.4.3"
+#define VERSION "0.4.4"
 
 // PB1. 0 and 2 are i2c or serial, 3 & 4 are xtal, 5 is reset.
 #define PILOT_DIGITAL_SAMPLING_PIN  1
@@ -47,18 +47,38 @@ SoftwareSerial serial(0, 2);
 // Turn on auto-detect
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
+// special return result for the 'digital communications' pilot.
+#define DIGITAL_COMM_REQD 999999
 // duty is tenths-of-a-percent (that is, fraction out of 1000).
 inline unsigned long dutyToMA(unsigned long duty) {
-  if (duty < 100) { // < 10% is an error
+  // Cribbed from the spec - grant a +/-2% slop
+  if (duty < 30) {
+    // < 3% is an error
     return 0;
-  } 
+  }
+  else if (duty <= 70) {
+    // 3-7% - digital
+    return DIGITAL_COMM_REQD;
+  }
+  else if (duty < 80) {
+    // 7-8% is an error
+    return 0;
+  }
+  else if (duty <= 10) {
+    // 8-10% is 6A
+    return 6000;
+  }
   else if (duty <= 850) { // 10-85% uses the "low" function
     return duty * 60;
   } 
   else if (duty <= 960) { // 85-96% uses the "high" function
     return (duty - 640) * 250;
-  } 
-  else { // > 96% is an error
+  }
+  else if (duty <= 970) {
+    // 96-97% is 80A
+    return 80000;
+  }
+  else { // > 97% is an error
     return 0;
   }
 }
@@ -116,7 +136,7 @@ void loop() {
     duty %= 1000; // turn 100% into 0% just for display purposes. A 100% duty cycle doesn't really make sense.
   
     unsigned long frequency = (state_changes / 2) * (1000 / SAMPLE_PERIOD);
-  
+
     amps = dutyToMA(duty);
   
     sprintf(buf, "%4ld Hz   %2d.%01d %%", frequency, duty / 10, duty % 10);
@@ -129,7 +149,12 @@ void loop() {
     serial.print(" ");
   }
 
-  sprintf(buf, "%2d.%02d A", amps / 1000, (amps % 1000) / 10);
+  if (amps == DIGITAL_COMM_REQD) {
+    sprintf(buf, "Digital");
+  } else {
+    sprintf(buf, "%2d.%02d A", amps / 1000, (amps % 1000) / 10);
+  }
+  
   if (display.LcdDetected()) {
     display.setCursor(0, 1);
     display.print(buf);
