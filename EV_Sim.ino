@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define VERSION "0.4.4"
+#define VERSION "0.5"
 
 // PB1. 0 and 2 are i2c or serial, 3 & 4 are xtal, 5 is reset.
 #define PILOT_DIGITAL_SAMPLING_PIN  1
@@ -64,7 +64,7 @@ inline unsigned long dutyToMA(unsigned long duty) {
     // 7-8% is an error
     return 0;
   }
-  else if (duty <= 10) {
+  else if (duty <= 100) {
     // 8-10% is 6A
     return 6000;
   }
@@ -138,7 +138,7 @@ void loop() {
     unsigned long frequency = (state_changes / 2) * (1000 / SAMPLE_PERIOD);
 
     amps = dutyToMA(duty);
-  
+
     sprintf(buf, "%4ld Hz   %2d.%01d %%", frequency, duty / 10, duty % 10);
   }
   if (display.LcdDetected()) {
@@ -152,7 +152,7 @@ void loop() {
   if (amps == DIGITAL_COMM_REQD) {
     sprintf(buf, "Digital");
   } else {
-    sprintf(buf, "%2d.%02d A", amps / 1000, (amps % 1000) / 10);
+    sprintf(buf, "%2ld.%02ld A", amps / 1000, (amps % 1000) / 10);
   }
   
   if (display.LcdDetected()) {
