@@ -24,6 +24,10 @@
 
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
 
+// Uncomment this line to swap the two cars. Do this if your physical layout
+// means that the cable for "car B" winds up on the left side of the display.
+//#define SWAP_CARS 1
+
 // ---------- DIGITAL PINS ----------
 #define INCOMING_PILOT_PIN      2
 #define INCOMING_PILOT_INT      0
@@ -33,6 +37,19 @@
 
 #define OUTGOING_PROXIMITY_PIN  4
 
+#ifdef SWAP_CARS
+#define CAR_A_PILOT_OUT_PIN     10
+#define CAR_B_PILOT_OUT_PIN     9
+
+#define CAR_A_RELAY             8
+#define CAR_B_RELAY             7
+
+// ---------- ANALOG PINS ----------
+#define CAR_A_PILOT_SENSE_PIN   1
+#define CAR_B_PILOT_SENSE_PIN   0
+#define CAR_A_CURRENT_PIN       3
+#define CAR_B_CURRENT_PIN       2
+#else
 #define CAR_A_PILOT_OUT_PIN     9
 #define CAR_B_PILOT_OUT_PIN     10
 
@@ -44,6 +61,7 @@
 #define CAR_B_PILOT_SENSE_PIN   1
 #define CAR_A_CURRENT_PIN       2
 #define CAR_B_CURRENT_PIN       3
+#endif
 
 #if 0
 // This is for hardware version 0.5 only, which is now obsolete.
@@ -210,7 +228,7 @@
 #define EVENT_SHORT_PUSH 1
 #define EVENT_LONG_PUSH 2
 
-#define VERSION "1.0 Beta 1"
+#define VERSION "1.0.1"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
