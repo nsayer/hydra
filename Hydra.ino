@@ -24,9 +24,18 @@
 
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
 
-// Uncomment this line to swap the two cars. Do this if your physical layout
-// means that the cable for "car B" winds up on the left side of the display.
-//#define SWAP_CARS 1
+// By historical accident, car B is actually
+// the lower pin number in most cases.
+//
+// The reason it matters is that in the UI, car "A"
+// is on the left. Therefore, car "A" is on the *right*
+// side of the component side of the board, since the LCD
+// is now permanently mounted. All things being equal, it's
+// more user-friendly to have the physical cable layout of
+// your chassis correspond to the display.
+//
+// If, for some reason, your wiring layout differs, then...
+// #define SWAP_CARS 1
 
 // ---------- DIGITAL PINS ----------
 #define INCOMING_PILOT_PIN      2
@@ -37,7 +46,7 @@
 
 #define OUTGOING_PROXIMITY_PIN  4
 
-#ifdef SWAP_CARS
+#ifndef SWAP_CARS
 #define CAR_A_PILOT_OUT_PIN     10
 #define CAR_B_PILOT_OUT_PIN     9
 
@@ -228,7 +237,7 @@
 #define EVENT_SHORT_PUSH 1
 #define EVENT_LONG_PUSH 2
 
-#define VERSION "1.0.1"
+#define VERSION "1.0.2"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -796,8 +805,8 @@ void setup() {
 
   log(LOG_DEBUG, "Starting v%s", VERSION);
   
-  pinMode(INCOMING_PILOT_PIN, INPUT);
-  pinMode(INCOMING_PROXIMITY_PIN, INPUT);
+  pinMode(INCOMING_PILOT_PIN, INPUT_PULLUP);
+  pinMode(INCOMING_PROXIMITY_PIN, INPUT_PULLUP);
   pinMode(OUTGOING_PROXIMITY_PIN, OUTPUT);
   pinMode(CAR_A_PILOT_OUT_PIN, OUTPUT);
   pinMode(CAR_B_PILOT_OUT_PIN, OUTPUT);
