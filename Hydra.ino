@@ -237,7 +237,7 @@
 #define EVENT_SHORT_PUSH 1
 #define EVENT_LONG_PUSH 2
 
-#define VERSION "1.0.2"
+#define VERSION "1.0.3"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -253,6 +253,7 @@ unsigned long last_state_log;
 unsigned int relay_state_a, relay_state_b, pilot_state_a, pilot_state_b;
 unsigned int lastProximity, operatingMode;
 unsigned long button_press_time, button_debounce_time;
+boolean paused = false;
 
 void log(unsigned int level, const char * fmt_str, ...) {
 #if SERIAL_LOG_LEVEL > 0
@@ -449,6 +450,7 @@ void setRelay(unsigned int car, unsigned int state) {
 // If it's in a transition delay, then it's "charging" (the relay is off during transition delay).
 // Otherwise, check the state of the relay.
 inline boolean isCarCharging(unsigned int car) {
+  if (paused) return false;
   switch(car) {
   case CAR_A:
     if (last_car_a_state == STATE_E) return LOW;
@@ -604,20 +606,29 @@ inline void reportIncomingPilot(unsigned long milliamps) {
 }
 
 void pollIncomingPilot() {
+  unsigned long transitions = -1; // ignore the first "transition"
+  int last_state = 99; // neither high nor low
   unsigned long high_count = 0, low_count = 0;
   for(unsigned long start = millis(); millis() - start < PILOT_POLL_INTERVAL; ) {
-    if (digitalRead(INCOMING_PILOT_PIN) == HIGH)
+    int state = digitalRead(INCOMING_PILOT_PIN);
+    if (state != last_state) transitions++;
+    last_state = state;
+    if (state == HIGH)
       high_count++;
     else
       low_count++;
   }
-
-  if (high_count == 0 && low_count == 0) {
-    // Something impossible has happened. We'll just assume a limit of 0
-    // to avoid divide-by-zero later.
+  
+  // We assume that the PILOT_POLL_INTERVAL is less than a second, so multiply by the
+  // reciprocal of the "seconds" of polling
+  unsigned long hz = (transitions / 2) * (1000 / PILOT_POLL_INTERVAL);
+  
+  // The spec allows 20% grace for frequency precision.
+  if (hz < 800 || hz > 1200) {
     reportIncomingPilot(0);
     return;
   }
+
   unsigned long milliamps = timeToMA(high_count, low_count);
 
   reportIncomingPilot(milliamps);
@@ -885,7 +896,7 @@ void loop() {
     boolean b = isCarCharging(CAR_B);
 
     // Neither car
-    if (!a && !b) display.setBacklight(GREEN);
+    if (!a && !b) display.setBacklight(paused?YELLOW:GREEN);
     // Both cars
     else if (a && b) display.setBacklight(VIOLET);
     // One car or the other
@@ -920,23 +931,35 @@ void loop() {
   lastProximity = proximity;
   if (proximity != HIGH) proximityOrPilotError = true;
 
-
   pollIncomingPilot();
-  if (incomingPilotMilliamps < MINIMUM_INLET_CURRENT) {
-    if (last_car_a_state != STATE_E || last_car_b_state != STATE_E) { 
-      log(LOG_INFO, "Incoming pilot error");
+  if (!proximityOrPilotError && incomingPilotMilliamps < MINIMUM_INLET_CURRENT) {
+    if (!paused) {
+      // Turn off both pilots
+      setPilot(CAR_A, HIGH);
+      setPilot(CAR_B, HIGH);
+      unsigned long now = millis();
+      car_a_error_time = now;
+      car_b_error_time = now;
+      last_car_a_state = DUNNO;
+      last_car_b_state = DUNNO;
+      car_a_request_time = 0;
+      car_b_request_time = 0;      
+      log(LOG_INFO, "Incoming pilot invalid. Pausing.");
       display.setCursor(0, 0);
-      display.print("I:ERROR ");
-      error(BOTH, 'I');
+      display.print("I:PAUSE ");
     }
-    // Forget it. Nothing else is worth doing as long as the input pilot continues to be gone.
+    paused = true;
     proximityOrPilotError = true;
+  } else {
+    paused = false;
   }
 
-  if(!proximityOrPilotError) {
-    display.setCursor(0, 0);
-    display.print("I:");
-    display.print(formatMilliamps(incomingPilotMilliamps));
+  if(paused || !proximityOrPilotError) {
+    if (!paused) {
+      display.setCursor(0, 0);
+      display.print("I:");
+      display.print(formatMilliamps(incomingPilotMilliamps));
+    }
     display.setCursor(8, 0);
     display.print("M:");
     switch(operatingMode) {
@@ -967,7 +990,7 @@ void loop() {
   // Check the pilot sense on each car.
   unsigned int car_a_state = checkState(CAR_A);
 
-  if (last_car_a_state == STATE_E) {
+  if (paused || last_car_a_state == STATE_E) {
     switch(car_a_state) {
     case STATE_A:
       // we were in error, but the car's been disconnected.
@@ -979,6 +1002,10 @@ void loop() {
         last_car_a_state = DUNNO;
         log(LOG_INFO, "Car A disconnected, clearing error");
       }
+      if (paused) {
+          display.setCursor(0, 1);
+          display.print("A: ---  ");
+      }
       // fall through...
     case STATE_B:
       // If we see a transition to state B, the error is still in effect, but complete (and
@@ -988,6 +1015,10 @@ void loop() {
         setRelay(CAR_A, LOW);
         if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
           setPilot(CAR_B, FULL);
+      }
+      if (paused && car_a_state == STATE_B) {
+        display.setCursor(0, 1);
+        display.print("A: off  ");
       }
       break;
     }
@@ -1005,7 +1036,7 @@ void loop() {
   }
 
   unsigned int car_b_state = checkState(CAR_B);
-  if (last_car_b_state == STATE_E) {
+  if (paused || last_car_b_state == STATE_E) {
     switch(car_b_state) {
     case STATE_A:
       // we were in error, but the car's been disconnected.
@@ -1017,6 +1048,10 @@ void loop() {
         last_car_b_state = DUNNO;
         log(LOG_INFO, "Car B disconnected, clearing error");
       }
+      if (paused) {
+          display.setCursor(8, 1);
+          display.print("B: ---  ");
+      }
       // fall through...
     case STATE_B:
       // If we see a transition to state B, the error is still in effect, but complete (and
@@ -1026,6 +1061,10 @@ void loop() {
         setRelay(CAR_B, LOW);
         if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
           setPilot(CAR_A, FULL);
+      }
+      if (paused && car_b_state == STATE_B) {
+        display.setCursor(8, 1);
+        display.print("B: off  ");
       }
       break;
     }
