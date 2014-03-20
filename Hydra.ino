@@ -237,7 +237,7 @@
 #define EVENT_SHORT_PUSH 1
 #define EVENT_LONG_PUSH 2
 
-#define VERSION "1.0.3"
+#define VERSION "1.0.4"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -326,16 +326,17 @@ inline const char* state_str(unsigned int state) {
 inline unsigned long timeToMA(unsigned long samplesHigh, unsigned long samplesLow) {
   // Calculate the duty cycle in mils (tenths of a percent)
   unsigned int duty = (samplesHigh * 1000) / (samplesHigh + samplesLow);
-  if (duty < 100) { // < 10% is an error
+  if (duty < 80) { // < 8% is an error (digital comm not supported)
     return 0;
-  } 
-  else if (duty <= 850) { // 10-85% uses the "low" function
+  } else if (duty <= 100) { // 8-10% is 6A - tolerance grace
+    return 6000L;
+  } else if (duty <= 850) { // 10-85% uses the "low" function
     return duty * 60L;
-  } 
-  else if (duty <= 960) { // 85-96% uses the "high" function
+  } else if (duty <= 960) { // 85-96% uses the "high" function
     return (duty - 640) * 250L;
-  } 
-  else { // > 96% is an error
+  } else if (duty <= 980) { // 96-98% is 80A - tolerance grace
+    return 80000L;
+  } else { // > 98% is an error
     return 0;
   }
 }
@@ -855,12 +856,12 @@ void setup() {
   display.setCursor(0, 1);
   display.print(VERSION);
 
-  boolean success = SetPinFrequency(CAR_A_PILOT_OUT_PIN, 1000);
+  boolean success = SetPinFrequencySafe(CAR_A_PILOT_OUT_PIN, 1000);
   if (!success) {
     log(LOG_INFO, "SetPinFrequency for car A failed!");
     display.setBacklight(YELLOW);
   }
-  success = SetPinFrequency(CAR_B_PILOT_OUT_PIN, 1000);
+  success = SetPinFrequencySafe(CAR_B_PILOT_OUT_PIN, 1000);
   if (!success) {
     log(LOG_INFO, "SetPinFrequency for car B failed!");
     display.setBacklight(BLUE);
