@@ -24,6 +24,7 @@
 #include <EEPROM.h>
 #include <Time.h>
 #include <DS1307RTC.h>
+#include <Timezone.h>
 
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
 
@@ -264,6 +265,8 @@ event_type events[EVENT_COUNT];
 #define EEPROM_LOC_CAR 1
 // The location in EEPROM to save the maximum current (in amps)
 #define EEPROM_LOC_MAX_AMPS 2
+// The location in EEPROM of the selected timezone
+#define EEPROM_LOC_TZ 3
 
 // Where do we start storing the events?
 #define EEPROM_EVENT_BASE 0x10
@@ -284,20 +287,39 @@ unsigned int currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44, 
 // menu 2: set time
 #define MENU_CLOCK 2
 #define MENU_CLOCK_HEADER "Set Clock?"
-// menu 3: event alarms
-#define MENU_EVENT 3
+// menu 3: time zone
+#define MENU_TZ 3
+#define MENU_TZ_HEADER "Time Zone"
+// menu 4: event alarms
+#define MENU_EVENT 4
 #define MENU_EVENT_HEADER "Config Events?"
-// menu 4: exit
-#define MENU_EXIT 4
+// menu 5: exit
+#define MENU_EXIT 5
 #define MENU_EXIT_HEADER "Exit Menus?"
 // end menus
-#define MAX_MENU_NUMBER 4
+#define MAX_MENU_NUMBER 5
 
 #define DAY_FLAGS "SMTWTFS"
 
 // What range of years are we going to allow? As time goes by, this can be incremented.
 #define FIRST_YEAR 2010
 #define LAST_YEAR 2020
+
+typedef struct zone_struct {
+  char zone_name[17];
+  TimeChangeRule start_rule, end_rule;
+} zone_type;
+
+PROGMEM zone_type zone_list[] = {
+{ "Pacific",  { "PDT",  Second, Sun, Mar, 2,  -7*60 }, { "PST",  First, Sun, Nov, 2,  -8*60 } },
+{ "Arizona",  { "MST",  First,  Sun, Jan, 0,  -7*60 }, { "MST",  First, Sun, Jan, 0,  -7*60 } },
+{ "Mountain", { "MDT",  Second, Sun, Mar, 2,  -6*60 }, { "MST",  First, Sun, Nov, 2,  -7*60 } },
+{ "Central",  { "CDT",  Second, Sun, Mar, 2,  -5*60 }, { "CST",  First, Sun, Nov, 2,  -6*60 } },
+{ "Eastern",  { "EDT",  Second, Sun, Mar, 2,  -4*60 }, { "EST",  First, Sun, Nov, 2,  -5*60 } },
+{ "Hawaii",   { "HST",  First,  Sun, Jan, 0, -10*60 }, { "HST",  First, Sun, Jan, 0, -10*60 } },
+{ "Alaska",   { "AKDT", Second, Sun, Mar, 2,  -8*60 }, { "AKST", First, Sun, Nov, 2,  -9*60 } },
+{ "", { NULL, First, Sun, Jan, 0, 0 }, { NULL, First, Sun, Jan, 0, 0 } } // Keep this at the end of the list
+};
 
 // Thanks to Gareth Evans at http://todbot.com/blog/2008/06/19/how-to-do-big-strings-in-arduino/
 // Note that you must be careful not to use this macro more than once per "statement", lest you
@@ -306,10 +328,11 @@ unsigned int currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44, 
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.0 (EVSE)"
+#define VERSION "2.0.1 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
+Timezone *zone = NULL;
 unsigned long incoming_pilot_samples[ROLLING_AVERAGE_SIZE];
 unsigned long car_a_current_samples[ROLLING_AVERAGE_SIZE], car_b_current_samples[ROLLING_AVERAGE_SIZE];
 unsigned long incomingPilotMilliamps, lastIncomingPilot;
@@ -400,6 +423,27 @@ inline const char* state_str(unsigned int state) {
   default: 
     return "UNKNOWN";
   }
+}
+
+unsigned char count_zone_options() {
+  zone_type selectedZone;
+  unsigned int i;
+  for(i = 0; true; i++) {
+    memcpy_P(&selectedZone, &(zone_list[i]), sizeof(zone_type));
+    if (selectedZone.zone_name[0] == 0) return i;
+  }
+}
+
+// Select a timezone from the list of available zones.
+void select_zone(unsigned char which) {
+  zone_type selectedZone;
+
+  // default to the first zone
+  if (which >= count_zone_options()) which = 0;
+  
+  memcpy_P(&selectedZone, &(zone_list[which]), sizeof(zone_type));
+  if (zone != NULL) delete(zone);
+  zone = new Timezone(selectedZone.start_rule, selectedZone.end_rule);
 }
 
 // Deal in milliamps so that we don't have to use floating point.
@@ -855,9 +899,9 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
 }
 
 unsigned int checkTimer() {
-  unsigned char ev_hour = hour();
-  unsigned char ev_minute = minute();
-  unsigned char ev_dow = dayOfWeek(now());
+  unsigned char ev_hour = hour(zone->toLocal(now()));
+  unsigned char ev_minute = minute(zone->toLocal(now()));
+  unsigned char ev_dow = dayOfWeek(zone->toLocal(now()));
   unsigned char ev_dow_mask = 1 << (ev_dow - 1);
   for (unsigned int i = 0; i < EVENT_COUNT; i++) {
     if (events[i].event_type == TE_NONE) continue; // This one doesn't count. It's turned off.
@@ -866,7 +910,7 @@ unsigned int checkTimer() {
       return events[i].event_type;
     }
   }
-  return TE_NONE; // XXX write me!
+  return TE_NONE;
 }
 
 unsigned int checkEvent() {
@@ -1004,6 +1048,8 @@ void setup() {
     events[i].event_type = event_type;
   }
   
+  select_zone(EEPROM.read(EEPROM_LOC_TZ));
+  
   setSyncProvider(RTC.get);
   
   display.setBacklight(WHITE);
@@ -1036,12 +1082,12 @@ void doClockMenu(boolean initialize) {
   if (initialize) {
     display.clear();
     display.print(P("Set Clock"));
-    editHour = hourFormat12();
-    editMeridian = isPM()?1:0;
-    editMinute = minute();
-    editDay = day();
-    editMonth = month();
-    editYear = year();
+    editHour = hourFormat12(zone->toLocal(now()));
+    editMeridian = isPM(zone->toLocal(now()))?1:0;
+    editMinute = minute(zone->toLocal(now()));
+    editDay = day(zone->toLocal(now()));
+    editMonth = month(zone->toLocal(now()));
+    editYear = year(zone->toLocal(now()));
     if (editYear < FIRST_YEAR || editYear > LAST_YEAR) editYear = FIRST_YEAR;
     editCursor = 0;
     event = EVENT_LONG_PUSH; // we did a long push to get here.
@@ -1074,8 +1120,16 @@ void doClockMenu(boolean initialize) {
       // convert hour back to 24 hours format
       if (editMeridian == 0 && editHour == 12) editHour = 0;
       if (editMeridian == 1 && editHour != 12) editHour += 12;
-      setTime(editHour, editMinute, 0, editDay, editMonth, editYear);
-      DS1307RTC::set(now());
+      tmElements_t tm;
+      tm.Year = editYear - 1970;
+      tm.Month = editMonth;
+      tm.Day = editDay;
+      tm.Hour = editHour;
+      tm.Minute = editMinute;
+      tm.Second = 0;
+      time_t utc = zone->toUTC(makeTime(tm));
+      setTime(utc);
+      DS1307RTC::set(utc);
       inClockMenu = false;
       display.clear();
       return;
@@ -1291,6 +1345,10 @@ void doMenu(boolean initialize) {
           return;
         }
         break;
+      case MENU_TZ:
+        select_zone(menu_item);
+        EEPROM.write(EEPROM_LOC_TZ, menu_item);
+        break;
       case MENU_EVENT:
         if (menu_item == 0) {
           inMenu = false;
@@ -1326,6 +1384,11 @@ void doMenu(boolean initialize) {
       case MENU_CLOCK:
         menu_item = 1; // default to "No"
         menu_item_max = 1;
+        break;
+      case MENU_TZ:
+        menu_item_max = count_zone_options() - 1;
+        menu_item = EEPROM.read(EEPROM_LOC_TZ);
+        if (menu_item > menu_item_max) menu_item = 0;
         break;
       case MENU_EVENT:
         menu_item = 1; // default to "No"
@@ -1374,6 +1437,13 @@ void doMenu(boolean initialize) {
           display.print(P(OPTION_NO_TEXT));
           break;
       }
+      break;
+    case MENU_TZ:
+      display.print(P(MENU_TZ_HEADER));
+      display.setCursor(0, 1);
+      display.print((menu_item == menu_item_selected)?'+':' ');
+      strcpy_P(p_buffer, zone_list[menu_item].zone_name);
+      display.print(p_buffer);
       break;
     case MENU_EVENT:
       display.print(P(MENU_EVENT_HEADER));
@@ -1470,7 +1540,7 @@ void loop() {
   // Print the time of day
   display.setCursor(0, 0);
   char buf[17];
-  snprintf(buf, sizeof(buf), P("%02d:%02d%cM "), hourFormat12(), minute(), isPM()?'P':'A');
+  snprintf(buf, sizeof(buf), P("%02d:%02d%cM "), hourFormat12(zone->toLocal(now())), minute(zone->toLocal(now())), isPM(zone->toLocal(now()))?'P':'A');
   display.print(buf);
   
   if (paused) {
