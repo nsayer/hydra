@@ -266,7 +266,7 @@ event_type events[EVENT_COUNT];
 // The location in EEPROM to save the maximum current (in amps)
 #define EEPROM_LOC_MAX_AMPS 2
 // The location in EEPROM of the selected timezone
-#define EEPROM_LOC_TZ 3
+#define EEPROM_LOC_USE_DST 3
 
 // Where do we start storing the events?
 #define EEPROM_EVENT_BASE 0x10
@@ -287,9 +287,9 @@ unsigned int currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44, 
 // menu 2: set time
 #define MENU_CLOCK 2
 #define MENU_CLOCK_HEADER "Set Clock?"
-// menu 3: time zone
-#define MENU_TZ 3
-#define MENU_TZ_HEADER "Time Zone"
+// menu 3: DST
+#define MENU_DST 3
+#define MENU_DST_HEADER "Enable DST?"
 // menu 4: event alarms
 #define MENU_EVENT 4
 #define MENU_EVENT_HEADER "Config Events?"
@@ -305,21 +305,16 @@ unsigned int currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44, 
 #define FIRST_YEAR 2010
 #define LAST_YEAR 2020
 
-typedef struct zone_struct {
-  char zone_name[17];
-  TimeChangeRule start_rule, end_rule;
-} zone_type;
-
-PROGMEM zone_type zone_list[] = {
-{ "Pacific",  { "PDT",  Second, Sun, Mar, 2,  -7*60 }, { "PST",  First, Sun, Nov, 2,  -8*60 } },
-{ "Arizona",  { "MST",  First,  Sun, Jan, 0,  -7*60 }, { "MST",  First, Sun, Jan, 0,  -7*60 } },
-{ "Mountain", { "MDT",  Second, Sun, Mar, 2,  -6*60 }, { "MST",  First, Sun, Nov, 2,  -7*60 } },
-{ "Central",  { "CDT",  Second, Sun, Mar, 2,  -5*60 }, { "CST",  First, Sun, Nov, 2,  -6*60 } },
-{ "Eastern",  { "EDT",  Second, Sun, Mar, 2,  -4*60 }, { "EST",  First, Sun, Nov, 2,  -5*60 } },
-{ "Hawaii",   { "HST",  First,  Sun, Jan, 0, -10*60 }, { "HST",  First, Sun, Jan, 0, -10*60 } },
-{ "Alaska",   { "AKDT", Second, Sun, Mar, 2,  -8*60 }, { "AKST", First, Sun, Nov, 2,  -9*60 } },
-{ "", { NULL, First, Sun, Jan, 0, 0 }, { NULL, First, Sun, Jan, 0, 0 } } // Keep this at the end of the list
-};
+// We don't really need to support timezones. We just want to perform automatic DST switching.
+// The following are the U.S. DST rules. If you live elsewhere, the customize these. The params
+// are a descriptive string (not used, but must be 5 chars or less), a "descriptor" for which
+// weekday in the active month is in the rule (first, second... last), the day of the week,
+// the month, and the hour of the day. The last parameter is the offset in minutes. You should
+// have the "winter" rule have a 0 offset so that turning off DST returns you to winter time.
+// The summer offset should be relative to winter time (probably +60 minutes).
+TimeChangeRule summer = { "DST", Second, Sun, Mar, 2, 60 };
+TimeChangeRule winter = { "ST", First, Sun, Nov, 2, 0 };
+Timezone dst(summer, winter);
 
 // Thanks to Gareth Evans at http://todbot.com/blog/2008/06/19/how-to-do-big-strings-in-arduino/
 // Note that you must be careful not to use this macro more than once per "statement", lest you
@@ -328,11 +323,10 @@ PROGMEM zone_type zone_list[] = {
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.1 (EVSE)"
+#define VERSION "2.0.2 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
-Timezone *zone = NULL;
 unsigned long incoming_pilot_samples[ROLLING_AVERAGE_SIZE];
 unsigned long car_a_current_samples[ROLLING_AVERAGE_SIZE], car_b_current_samples[ROLLING_AVERAGE_SIZE];
 unsigned long incomingPilotMilliamps, lastIncomingPilot;
@@ -360,6 +354,7 @@ unsigned int last_minute = 99;
 unsigned char editHour, editMinute, editMeridian, editDay, editMonth, editCursor, editEvent, editDOW, editType;
 unsigned int editYear;
 boolean blink;
+boolean enable_dst;
 
 void log(unsigned int level, const char * fmt_str, ...) {
 #if SERIAL_LOG_LEVEL > 0
@@ -423,27 +418,6 @@ inline const char* state_str(unsigned int state) {
   default: 
     return "UNKNOWN";
   }
-}
-
-unsigned char count_zone_options() {
-  zone_type selectedZone;
-  unsigned int i;
-  for(i = 0; true; i++) {
-    memcpy_P(&selectedZone, &(zone_list[i]), sizeof(zone_type));
-    if (selectedZone.zone_name[0] == 0) return i;
-  }
-}
-
-// Select a timezone from the list of available zones.
-void select_zone(unsigned char which) {
-  zone_type selectedZone;
-
-  // default to the first zone
-  if (which >= count_zone_options()) which = 0;
-  
-  memcpy_P(&selectedZone, &(zone_list[which]), sizeof(zone_type));
-  if (zone != NULL) delete(zone);
-  zone = new Timezone(selectedZone.start_rule, selectedZone.end_rule);
 }
 
 // Deal in milliamps so that we don't have to use floating point.
@@ -899,9 +873,9 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
 }
 
 unsigned int checkTimer() {
-  unsigned char ev_hour = hour(zone->toLocal(now()));
-  unsigned char ev_minute = minute(zone->toLocal(now()));
-  unsigned char ev_dow = dayOfWeek(zone->toLocal(now()));
+  unsigned char ev_hour = hour(localTime());
+  unsigned char ev_minute = minute(localTime());
+  unsigned char ev_dow = dayOfWeek(localTime());
   unsigned char ev_dow_mask = 1 << (ev_dow - 1);
   for (unsigned int i = 0; i < EVENT_COUNT; i++) {
     if (events[i].event_type == TE_NONE) continue; // This one doesn't count. It's turned off.
@@ -968,17 +942,30 @@ void gfiSelfTest() {
   gfiTriggered = false;
 }
 
-void setup() {
-  InitTimersSafe();
-  display.setMCPType(LTI_TYPE_MCP23017);
-  display.begin(16, 2); 
+inline time_t localTime() {
+  return enable_dst?dst.toLocal(now()):now();
+}
 
+void setup() {
+
+  // Start serial logging first so we can detect a good CPU reset.
 #if SERIAL_LOG_LEVEL > 0
   Serial.begin(SERIAL_BAUD_RATE);
 #endif
 
   log(LOG_DEBUG, P("Starting v%s"), VERSION);
   
+  InitTimersSafe();
+  
+  display.setMCPType(LTI_TYPE_MCP23017);
+  display.begin(16, 2);   
+  display.setBacklight(WHITE);
+  display.clear();
+  display.setCursor(0, 0);
+  display.print(P("J1772 Hydra"));
+  display.setCursor(0, 1);
+  display.print(P(VERSION));
+
   pinMode(GFI_PIN, INPUT);
   pinMode(GFI_TEST_PIN, OUTPUT);
   digitalWrite(GFI_TEST_PIN, LOW);
@@ -1048,16 +1035,9 @@ void setup() {
     events[i].event_type = event_type;
   }
   
-  select_zone(EEPROM.read(EEPROM_LOC_TZ));
+  enable_dst = EEPROM.read(EEPROM_LOC_USE_DST) != 0;
   
   setSyncProvider(RTC.get);
-  
-  display.setBacklight(WHITE);
-  display.clear();
-  display.setCursor(0, 0);
-  display.print(P("J1772 Hydra"));
-  display.setCursor(0, 1);
-  display.print(P(VERSION));
 
   boolean success = SetPinFrequencySafe(CAR_A_PILOT_OUT_PIN, 1000);
   if (!success) {
@@ -1082,12 +1062,12 @@ void doClockMenu(boolean initialize) {
   if (initialize) {
     display.clear();
     display.print(P("Set Clock"));
-    editHour = hourFormat12(zone->toLocal(now()));
-    editMeridian = isPM(zone->toLocal(now()))?1:0;
-    editMinute = minute(zone->toLocal(now()));
-    editDay = day(zone->toLocal(now()));
-    editMonth = month(zone->toLocal(now()));
-    editYear = year(zone->toLocal(now()));
+    editHour = hourFormat12(localTime());
+    editMeridian = isPM(localTime())?1:0;
+    editMinute = minute(localTime());
+    editDay = day(localTime());
+    editMonth = month(localTime());
+    editYear = year(localTime());
     if (editYear < FIRST_YEAR || editYear > LAST_YEAR) editYear = FIRST_YEAR;
     editCursor = 0;
     event = EVENT_LONG_PUSH; // we did a long push to get here.
@@ -1127,9 +1107,13 @@ void doClockMenu(boolean initialize) {
       tm.Hour = editHour;
       tm.Minute = editMinute;
       tm.Second = 0;
-      time_t utc = zone->toUTC(makeTime(tm));
-      setTime(utc);
-      DS1307RTC::set(utc);
+      time_t toSet = makeTime(tm);
+      // The underlying system clock is always winter time.
+      // Note that setting the time during the repeated hour in
+      // the fall will assume winter time - the hour will NOT repeat.
+      if (enable_dst) toSet = dst.toUTC(toSet);
+      setTime(toSet);
+      DS1307RTC::set(toSet);
       inClockMenu = false;
       display.clear();
       return;
@@ -1175,6 +1159,7 @@ void doClockMenu(boolean initialize) {
   else
     display.print(buf);
 }
+
 void doEventMenu(boolean initialize) {
   unsigned int event = checkEvent();
   if (initialize) {
@@ -1345,9 +1330,9 @@ void doMenu(boolean initialize) {
           return;
         }
         break;
-      case MENU_TZ:
-        select_zone(menu_item);
-        EEPROM.write(EEPROM_LOC_TZ, menu_item);
+      case MENU_DST:
+        enable_dst = menu_item == 0;
+        EEPROM.write(EEPROM_LOC_USE_DST, enable_dst?1:0);
         break;
       case MENU_EVENT:
         if (menu_item == 0) {
@@ -1385,10 +1370,9 @@ void doMenu(boolean initialize) {
         menu_item = 1; // default to "No"
         menu_item_max = 1;
         break;
-      case MENU_TZ:
-        menu_item_max = count_zone_options() - 1;
-        menu_item = EEPROM.read(EEPROM_LOC_TZ);
-        if (menu_item > menu_item_max) menu_item = 0;
+      case MENU_DST:
+        menu_item_max = 1;
+        menu_item = enable_dst?0:1;
         break;
       case MENU_EVENT:
         menu_item = 1; // default to "No"
@@ -1438,12 +1422,18 @@ void doMenu(boolean initialize) {
           break;
       }
       break;
-    case MENU_TZ:
-      display.print(P(MENU_TZ_HEADER));
+    case MENU_DST:
+      display.print(P(MENU_DST_HEADER));
       display.setCursor(0, 1);
       display.print((menu_item == menu_item_selected)?'+':' ');
-      strcpy_P(p_buffer, zone_list[menu_item].zone_name);
-      display.print(p_buffer);
+      switch(menu_item) {
+        case 0:
+          display.print(P(OPTION_YES_TEXT));
+          break;
+        case 1:
+          display.print(P(OPTION_NO_TEXT));
+          break;
+      }
       break;
     case MENU_EVENT:
       display.print(P(MENU_EVENT_HEADER));
@@ -1540,7 +1530,7 @@ void loop() {
   // Print the time of day
   display.setCursor(0, 0);
   char buf[17];
-  snprintf(buf, sizeof(buf), P("%02d:%02d%cM "), hourFormat12(zone->toLocal(now())), minute(zone->toLocal(now())), isPM(zone->toLocal(now()))?'P':'A');
+  snprintf(buf, sizeof(buf), P("%2d:%02d%cM "), hourFormat12(localTime()), minute(localTime()), isPM(localTime())?'P':'A');
   display.print(buf);
   
   if (paused) {
@@ -1812,8 +1802,8 @@ void loop() {
     }
   }
   
-  if (last_minute != minute()) {
-    last_minute = minute();
+  if (last_minute != minute(localTime())) {
+    last_minute = minute(localTime());
     event = checkTimer();
     switch(event) {
       case TE_PAUSE:
