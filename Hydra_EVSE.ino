@@ -144,24 +144,9 @@
 // 5000 ms.
 #define TRANSITION_DELAY 4500
 
-// This is the current limit (in milliamps) of all of the components on the inlet side of the hydra -
-// the inlet itself, any fuses, and the wiring to the common sides of the relays.
-#define MAXIMUM_INLET_CURRENT 75000
-
-// This is the minimum of the ampacity (in milliamps) of all of the components from the relay to the plug -
-// The relay itself, the J1772 cable and plug.
+// This is the minimum of the ampacity (in milliamps) of all of the components from the distribution block to the plug -
+// the wire to the relay, the relay itself, and the J1772 cable and plug.
 #define MAXIMUM_OUTLET_CURRENT 30000
-
-// This can not be lower than 12, because the J1772 spec bottoms out at 6A.
-// The hydra won't operate properly if it can't divide the incoming power in half. (in milliamps)
-#define MINIMUM_INLET_CURRENT 12000
-
-// This is the amount of current (in milliamps) we subtract from the inlet before apportioning it to the cars.
-#define INLET_CURRENT_DERATE 0
-
-// Amount of time, in milliseconds, we will analyse the duty cycle of the incoming pilot
-// Default is 200 cycles. We're doing a digitalRead(), so this will be thousands of samples.
-#define PILOT_POLL_INTERVAL 25
 
 // Amount of time, in milliseconds, we will look for positive and negative peaks on the car
 // pilot pins. It takes around .1 ms to do one read, so we should get a bit less than 200 chances
@@ -200,8 +185,8 @@
 // (1 / Te) * Rb = Rb / Te = Volts per Amp. For the reference design, that's 55.009 mV.
 
 // Each count of the A/d converter is 4.882 mV (5/1024). V/A divided by V/unit is unit/A. For the reference
-// design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get...
-#define CURRENT_SCALE_FACTOR 88.7625558
+// design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get 88.7625558. Round near...
+#define CURRENT_SCALE_FACTOR 89
 
 #define LOG_NONE 0
 #define LOG_INFO 1
@@ -278,7 +263,7 @@ event_type events[EVENT_COUNT];
 #define MENU_OPERATING_MODE_HEADER "Operating Mode"
 // menu 1: current available
 #define MENU_CURRENT_AVAIL 1
-unsigned int currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44, 50, 60, 75, 80*/ };
+unsigned char currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44, 50, 60, 75, 80*/ };
 #define CURRENT_AVAIL_MENU_MAX (sizeof(currentMenuChoices) - 1)
 #define MENU_CURRENT_AVAIL_HEADER "Current Avail."
 
@@ -323,13 +308,12 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.2 (EVSE)"
+#define VERSION "2.0.3 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
-unsigned long incoming_pilot_samples[ROLLING_AVERAGE_SIZE];
 unsigned long car_a_current_samples[ROLLING_AVERAGE_SIZE], car_b_current_samples[ROLLING_AVERAGE_SIZE];
-unsigned long incomingPilotMilliamps, lastIncomingPilot;
+unsigned long incomingPilotMilliamps;
 unsigned int last_car_a_state, last_car_b_state;
 unsigned long car_a_overdraw_begin, car_b_overdraw_begin;
 unsigned long car_a_request_time, car_b_request_time;
@@ -338,7 +322,7 @@ unsigned long last_current_log_car_a, last_current_log_car_b;
 unsigned long last_state_log;
 unsigned long sequential_pilot_timeout;
 unsigned int relay_state_a, relay_state_b, pilot_state_a, pilot_state_b;
-unsigned int lastProximity, operatingMode, sequential_mode_tiebreak;
+unsigned int operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
 boolean paused = false;
 boolean enterPause = false;
@@ -350,7 +334,7 @@ unsigned int menu_number; // which menu are we presently in?
 unsigned int menu_item; // which item within the present menu is the currently displayed option?
 unsigned int menu_item_max; // for the current menu, what's the maximum item number?
 unsigned int menu_item_selected;  // for the current menu, which option is presently selected?
-unsigned int last_minute = 99;
+int last_minute;
 unsigned char editHour, editMinute, editMeridian, editDay, editMonth, editCursor, editEvent, editDOW, editType;
 unsigned int editYear;
 boolean blink;
@@ -384,7 +368,7 @@ void log(unsigned int level, const char * fmt_str, ...) {
 #endif
 }
 
-inline const char *car_str(unsigned int car) {
+static inline const char *car_str(unsigned int car) {
   switch(car) {
     case CAR_A: return "car A";
     case CAR_B: return "car B";
@@ -393,7 +377,7 @@ inline const char *car_str(unsigned int car) {
   }
 }
 
-inline const char *logic_str(unsigned int state) {
+static inline const char *logic_str(unsigned int state) {
   switch(state) {
     case LOW: return "LOW";
     case HIGH: return "HIGH";
@@ -403,7 +387,7 @@ inline const char *logic_str(unsigned int state) {
   }
 }
 
-inline const char* state_str(unsigned int state) {
+static inline const char* state_str(unsigned int state) {
   switch(state) {
   case STATE_A: 
     return "A";
@@ -420,31 +404,9 @@ inline const char* state_str(unsigned int state) {
   }
 }
 
-// Deal in milliamps so that we don't have to use floating point.
-// Convert the microsecond state timings from the incoming pilot into
-// an instantaneous current allowance value. With polling, it's
-// the two sample counts, but the math winds up being exactly the same.
-inline unsigned long timeToMA(unsigned long samplesHigh, unsigned long samplesLow) {
-  // Calculate the duty cycle in mils (tenths of a percent)
-  unsigned int duty = (samplesHigh * 1000) / (samplesHigh + samplesLow);
-  if (duty < 80) { // < 8% is an error (digital comm not supported)
-    return 0;
-  } else if (duty <= 100) { // 8-10% is 6A - tolerance grace
-    return 6000L;
-  } else if (duty <= 850) { // 10-85% uses the "low" function
-    return duty * 60L;
-  } else if (duty <= 960) { // 85-96% uses the "high" function
-    return (duty - 640) * 250L;
-  } else if (duty <= 980) { // 96-98% is 80A - tolerance grace
-    return 80000L;
-  } else { // > 98% is an error
-    return 0;
-  }
-}
-
 // Convert a milliamp allowance into an outgoing pilot duty cycle.
 // In lieu of floating point, this is duty in mils (tenths of a percent)
-inline static unsigned int MAToDuty(unsigned long milliamps) {
+static inline unsigned int MAToDuty(unsigned long milliamps) {
   if (milliamps < 6000) {
     return 9999; // illegal - set pilot to "high"
   } 
@@ -524,13 +486,13 @@ void error(unsigned int car, char err) {
     display.setCursor(0, 1);
     display.print(P("A:ERR "));
     display.print(err);
-    display.print(P(" "));
+    display.print(' ');
   }
   if (car == BOTH || car == CAR_B) {
     display.setCursor(8, 1);
     display.print(P("B:ERR "));
     display.print(err);
-    display.print(P(" "));
+    display.print(' ');
   }
 
   log(LOG_INFO, P("Error %c on %s"), err, car_str(car));
@@ -562,7 +524,7 @@ void setRelay(unsigned int car, unsigned int state) {
 // If it's in an error state, it's not charging (the relay may still be on during error delay).
 // If it's in a transition delay, then it's "charging" (the relay is off during transition delay).
 // Otherwise, check the state of the relay.
-inline boolean isCarCharging(unsigned int car) {
+static inline boolean isCarCharging(unsigned int car) {
   if (paused) return false;
   switch(car) {
   case CAR_A:
@@ -614,7 +576,7 @@ void setPilot(unsigned int car, unsigned int which) {
   }
 }
 
-inline static unsigned int pilotState(unsigned int car) {
+static inline unsigned int pilotState(unsigned int car) {
   return (car == CAR_A)?pilot_state_a:pilot_state_b;
 }
 
@@ -653,6 +615,15 @@ int checkState(unsigned int car) {
   return STATE_E;
 }
 
+static inline unsigned long ulong_sqrt(unsigned long in) {
+  unsigned long out;
+  // find the last int whose square is not too big
+  // Yes, it's wasteful, but we only theoretically ever have to go to 512.
+  // Removing floating point saves us almost 1K of flash.
+  for(out = 1; out*out <= in; out++) ;
+  return out - 1;
+}
+
 unsigned long readCurrent(unsigned int car) {
   unsigned int car_pin = (car == CAR_A) ? CAR_A_CURRENT_PIN : CAR_B_CURRENT_PIN;
   unsigned long sum = 0;
@@ -686,7 +657,7 @@ unsigned long readCurrent(unsigned int car) {
     case 3:
       // The answer is the square root of the mean of the squares.
       // But additionally, that value must be scaled to a real current value.
-      return (unsigned long)(sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR);
+      return ulong_sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR;
     }
   }
   // ran out of time. Assume that it's simply not oscillating any. 
@@ -942,119 +913,8 @@ void gfiSelfTest() {
   gfiTriggered = false;
 }
 
-inline time_t localTime() {
+static inline time_t localTime() {
   return enable_dst?dst.toLocal(now()):now();
-}
-
-void setup() {
-
-  // Start serial logging first so we can detect a good CPU reset.
-#if SERIAL_LOG_LEVEL > 0
-  Serial.begin(SERIAL_BAUD_RATE);
-#endif
-
-  log(LOG_DEBUG, P("Starting v%s"), VERSION);
-  
-  InitTimersSafe();
-  
-  display.setMCPType(LTI_TYPE_MCP23017);
-  display.begin(16, 2);   
-  display.setBacklight(WHITE);
-  display.clear();
-  display.setCursor(0, 0);
-  display.print(P("J1772 Hydra"));
-  display.setCursor(0, 1);
-  display.print(P(VERSION));
-
-  pinMode(GFI_PIN, INPUT);
-  pinMode(GFI_TEST_PIN, OUTPUT);
-  digitalWrite(GFI_TEST_PIN, LOW);
-  attachInterrupt(GFI_IRQ, gfi_trigger, RISING);
-  pinMode(CAR_A_PILOT_OUT_PIN, OUTPUT);
-  pinMode(CAR_B_PILOT_OUT_PIN, OUTPUT);
-  pinMode(CAR_A_RELAY, OUTPUT);
-  pinMode(CAR_B_RELAY, OUTPUT);
-
-  // Enter state A on both cars
-  setPilot(CAR_A, HIGH);
-  setPilot(CAR_B, HIGH);
-  // And make sure the power is off.
-  setRelay(CAR_A, LOW);
-  setRelay(CAR_B, LOW);
-
-  memset(car_a_current_samples, 0, sizeof(car_a_current_samples));
-  memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
-  last_car_a_state = DUNNO;
-  last_car_b_state = DUNNO;
-  car_a_request_time = 0;
-  car_b_request_time = 0;
-  car_a_overdraw_begin = 0;
-  car_b_overdraw_begin = 0;
-  last_current_log_car_a = 0;
-  last_current_log_car_b = 0;
-  lastProximity = HIGH;
-  button_debounce_time = 0;
-  button_press_time = 0;
-  sequential_pilot_timeout = 0;
-  
-  operatingMode = EEPROM.read(EEPROM_LOC_MODE);
-  if (operatingMode > LAST_MODE) {
-    operatingMode = DEFAULT_MODE;
-    EEPROM.write(EEPROM_LOC_MODE, operatingMode);
-  }
-  if (operatingMode == MODE_SEQUENTIAL) {
-    sequential_mode_tiebreak = EEPROM.read(EEPROM_LOC_CAR);
-    if (sequential_mode_tiebreak != CAR_A && sequential_mode_tiebreak != CAR_B)
-      sequential_mode_tiebreak = DUNNO;
-  }
-  unsigned int max_current_amps = EEPROM.read(EEPROM_LOC_MAX_AMPS);
-  // Make sure that the saved value is one of the choices in the menu
-  boolean found = false;
-  for(unsigned int i = 0; i < sizeof(currentMenuChoices); i++) {
-    if (max_current_amps == currentMenuChoices[i]) {
-      found = true;
-      break;
-    }
-  }
-  if (!found)
-    max_current_amps = currentMenuChoices[0]; // If it's not a choice, pick the first option
-  incomingPilotMilliamps = max_current_amps * 1000L;
-
-  for(unsigned int i = 0; i < EVENT_COUNT; i++) {
-    unsigned char ev_hour = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 0);
-    unsigned char ev_minute = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 1);
-    unsigned char dow_mask = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 2);
-    unsigned char event_type = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 3);
-    if (event_type > TE_LAST) event_type = TE_NONE;
-    if (ev_hour > 23) ev_hour = 0;
-    if (ev_minute > 59) ev_minute = 0;
-    dow_mask &= 0x7f; //there are only 7 days of the week
-    events[i].hour = ev_hour;
-    events[i].minute = ev_minute;
-    events[i].dow_mask = dow_mask;
-    events[i].event_type = event_type;
-  }
-  
-  enable_dst = EEPROM.read(EEPROM_LOC_USE_DST) != 0;
-  
-  setSyncProvider(RTC.get);
-
-  boolean success = SetPinFrequencySafe(CAR_A_PILOT_OUT_PIN, 1000);
-  if (!success) {
-    log(LOG_INFO, P("SetPinFrequency for car A failed!"));
-    display.setBacklight(YELLOW);
-  }
-  success = SetPinFrequencySafe(CAR_B_PILOT_OUT_PIN, 1000);
-  if (!success) {
-    log(LOG_INFO, P("SetPinFrequency for car B failed!"));
-    display.setBacklight(BLUE);
-  }
-  // In principle, neither of the above two !success conditions should ever
-  // happen.
-
-  delay(2000); // let the splash screen show
-  display.clear();
-  gfiSelfTest();
 }
 
 void doClockMenu(boolean initialize) {
@@ -1113,7 +973,7 @@ void doClockMenu(boolean initialize) {
       // the fall will assume winter time - the hour will NOT repeat.
       if (enable_dst) toSet = dst.toUTC(toSet);
       setTime(toSet);
-      DS1307RTC::set(toSet);
+      RTC.set(toSet);
       inClockMenu = false;
       display.clear();
       return;
@@ -1267,7 +1127,7 @@ void doEventMenu(boolean initialize) {
   else
     display.print(buf);
   if (blink && editCursor == 3)
-    display.print(P(" "));
+    display.print(' ');
   else {
     display.print(editMeridian == 1?'P':'A');
   }
@@ -1464,6 +1324,117 @@ void doMenu(boolean initialize) {
   }
 }
 
+void setup() {
+
+  // Start serial logging first so we can detect a good CPU reset.
+#if SERIAL_LOG_LEVEL > 0
+  Serial.begin(SERIAL_BAUD_RATE);
+#endif
+
+  log(LOG_DEBUG, P("Starting v%s"), VERSION);
+  
+  InitTimersSafe();
+  
+  display.setMCPType(LTI_TYPE_MCP23017);
+  display.begin(16, 2);   
+  display.setBacklight(WHITE);
+  display.clear();
+  display.setCursor(0, 0);
+  display.print(P("J1772 Hydra"));
+  display.setCursor(0, 1);
+  display.print(P(VERSION));
+
+  pinMode(GFI_PIN, INPUT);
+  pinMode(GFI_TEST_PIN, OUTPUT);
+  digitalWrite(GFI_TEST_PIN, LOW);
+  attachInterrupt(GFI_IRQ, gfi_trigger, RISING);
+  pinMode(CAR_A_PILOT_OUT_PIN, OUTPUT);
+  pinMode(CAR_B_PILOT_OUT_PIN, OUTPUT);
+  pinMode(CAR_A_RELAY, OUTPUT);
+  pinMode(CAR_B_RELAY, OUTPUT);
+
+  // Enter state A on both cars
+  setPilot(CAR_A, HIGH);
+  setPilot(CAR_B, HIGH);
+  // And make sure the power is off.
+  setRelay(CAR_A, LOW);
+  setRelay(CAR_B, LOW);
+
+  memset(car_a_current_samples, 0, sizeof(car_a_current_samples));
+  memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
+  last_car_a_state = DUNNO;
+  last_car_b_state = DUNNO;
+  car_a_request_time = 0;
+  car_b_request_time = 0;
+  car_a_overdraw_begin = 0;
+  car_b_overdraw_begin = 0;
+  last_current_log_car_a = 0;
+  last_current_log_car_b = 0;
+  button_debounce_time = 0;
+  button_press_time = 0;
+  sequential_pilot_timeout = 0;
+  last_minute = 99;
+  
+  operatingMode = EEPROM.read(EEPROM_LOC_MODE);
+  if (operatingMode > LAST_MODE) {
+    operatingMode = DEFAULT_MODE;
+    EEPROM.write(EEPROM_LOC_MODE, operatingMode);
+  }
+  if (operatingMode == MODE_SEQUENTIAL) {
+    sequential_mode_tiebreak = EEPROM.read(EEPROM_LOC_CAR);
+    if (sequential_mode_tiebreak != CAR_A && sequential_mode_tiebreak != CAR_B)
+      sequential_mode_tiebreak = DUNNO;
+  }
+  unsigned int max_current_amps = EEPROM.read(EEPROM_LOC_MAX_AMPS);
+  // Make sure that the saved value is one of the choices in the menu
+  boolean found = false;
+  for(unsigned int i = 0; i < sizeof(currentMenuChoices); i++) {
+    if (max_current_amps == currentMenuChoices[i]) {
+      found = true;
+      break;
+    }
+  }
+  if (!found)
+    max_current_amps = currentMenuChoices[0]; // If it's not a choice, pick the first option
+  incomingPilotMilliamps = max_current_amps * 1000L;
+
+  for(unsigned int i = 0; i < EVENT_COUNT; i++) {
+    unsigned char ev_hour = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 0);
+    unsigned char ev_minute = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 1);
+    unsigned char dow_mask = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 2);
+    unsigned char event_type = EEPROM.read(EEPROM_EVENT_BASE + i * 4 + 3);
+    if (event_type > TE_LAST) event_type = TE_NONE;
+    if (ev_hour > 23) ev_hour = 0;
+    if (ev_minute > 59) ev_minute = 0;
+    dow_mask &= 0x7f; //there are only 7 days of the week
+    events[i].hour = ev_hour;
+    events[i].minute = ev_minute;
+    events[i].dow_mask = dow_mask;
+    events[i].event_type = event_type;
+  }
+  
+  enable_dst = EEPROM.read(EEPROM_LOC_USE_DST) != 0;
+  
+  setSyncProvider(RTC.get);
+
+  boolean success = SetPinFrequencySafe(CAR_A_PILOT_OUT_PIN, 1000);
+  if (!success) {
+    log(LOG_INFO, P("SetPinFrequency for car A failed!"));
+    display.setBacklight(YELLOW);
+  }
+  success = SetPinFrequencySafe(CAR_B_PILOT_OUT_PIN, 1000);
+  if (!success) {
+    log(LOG_INFO, P("SetPinFrequency for car B failed!"));
+    display.setBacklight(BLUE);
+  }
+  // In principle, neither of the above two !success conditions should ever
+  // happen.
+
+  delay(2000); // let the splash screen show
+  display.clear();
+  gfiSelfTest();
+}
+
 void loop() {
 
   if (inMenu) {
@@ -1554,7 +1525,7 @@ void loop() {
     switch(car_a_state) {
     case STATE_A:
       // we were in error, but the car's been disconnected.
-      // If we still have a pilot or proximity error, then
+      // If we are still paused, then
       // we can't clear the error.
       if (!paused) {
       // If not, clear the error state. The next time through
@@ -1562,6 +1533,7 @@ void loop() {
         last_car_a_state = DUNNO;
         log(LOG_INFO, P("Car A disconnected, clearing error"));
       } else {
+        // We're paused. We will fix up the display ourselves.
         display.setCursor(0, 1);
         display.print("A: ---  ");
       }
@@ -1599,7 +1571,7 @@ void loop() {
     switch(car_b_state) {
     case STATE_A:
       // we were in error, but the car's been disconnected.
-      // If we still have a pilot or proximity error, then
+      // If we are still paused, then
       // we can't clear the error.
       if (!paused) {
         // If not, clear the error state. The next time through
@@ -1607,6 +1579,7 @@ void loop() {
         last_car_b_state = DUNNO;
         log(LOG_INFO, P("Car B disconnected, clearing error"));
       } else {
+        // We're paused. We will fix up the display ourselves.
         display.setCursor(8, 1);
         display.print("B: ---  ");
       }
