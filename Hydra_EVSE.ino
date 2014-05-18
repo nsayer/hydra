@@ -145,7 +145,8 @@
 #define TRANSITION_DELAY 4500
 
 // This is the minimum of the ampacity (in milliamps) of all of the components from the distribution block to the plug -
-// the wire to the relay, the relay itself, and the J1772 cable and plug.
+// the wire to the relay, the relay itself, and the J1772 cable and plug. This is not part of the UI, because it's never
+// going to change once you build your Hydra.
 #define MAXIMUM_OUTLET_CURRENT 30000
 
 // Amount of time, in milliseconds, we will look for positive and negative peaks on the car
@@ -234,6 +235,9 @@
 #define TE_UNPAUSE 2
 #define TE_LAST TE_UNPAUSE
 
+// Uncomment this if you want a 24 hour clock instead of AM/PM
+// #define CLOCK_24HOUR 1
+
 #define EVENT_COUNT 4
 typedef struct event_struct {
   unsigned char hour;
@@ -263,7 +267,13 @@ event_type events[EVENT_COUNT];
 #define MENU_OPERATING_MODE_HEADER "Operating Mode"
 // menu 1: current available
 #define MENU_CURRENT_AVAIL 1
-unsigned char currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44, 50, 60, 75, 80*/ };
+
+// You REALLY want to exclude the entries from this list that exceed the
+// specifications of your hardware. It's actually somewhat questionable that this
+// is actually a menu, but it's just conceivable that a Hydra might be portable,
+// which means you might need to adjust it on the fly.
+unsigned char currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40, 44, 50 /*, 60, 75, 80*/ };
+
 #define CURRENT_AVAIL_MENU_MAX (sizeof(currentMenuChoices) - 1)
 #define MENU_CURRENT_AVAIL_HEADER "Current Avail."
 
@@ -299,6 +309,16 @@ unsigned char currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40/*, 44,
 // The summer offset should be relative to winter time (probably +60 minutes).
 TimeChangeRule summer = { "DST", Second, Sun, Mar, 2, 60 };
 TimeChangeRule winter = { "ST", First, Sun, Nov, 2, 0 };
+#if 0
+// European Union
+TimeChangeRule summer = { "DST", Last, Sun, Mar, 1, 60 };
+TimeChangeRule winter = { "ST", Last, Sun, Oct, 1, 0 };
+#endif
+#if 0
+// Australia - note the reversal due to the Southern hemisphere
+TimeChangeRule summer = { "DST", First, Sun, Oct, 2, 60 };
+TimeChangeRule winter = { "ST", First, Sun, Apr, 2, 0 };
+#endif
 Timezone dst(summer, winter);
 
 // Thanks to Gareth Evans at http://todbot.com/blog/2008/06/19/how-to-do-big-strings-in-arduino/
@@ -308,7 +328,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.3 (EVSE)"
+#define VERSION "2.0.4 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -335,7 +355,10 @@ unsigned int menu_item; // which item within the present menu is the currently d
 unsigned int menu_item_max; // for the current menu, what's the maximum item number?
 unsigned int menu_item_selected;  // for the current menu, which option is presently selected?
 int last_minute;
-unsigned char editHour, editMinute, editMeridian, editDay, editMonth, editCursor, editEvent, editDOW, editType;
+unsigned char editHour, editMinute, editDay, editMonth, editCursor, editEvent, editDOW, editType;
+#ifndef CLOCK_24HOUR
+unsigned char editMeridian;
+#endif
 unsigned int editYear;
 boolean blink;
 boolean enable_dst;
@@ -824,7 +847,7 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         setPilot(them, HALF);
         display.setCursor((us == CAR_A)?0:8, 1);
         display.print((us == CAR_A)?"A":"B");
-        display.print(": wait ");
+        display.print(P(": wait "));
       } else {
         // if they're not charging, then we can just go. If they have a full pilot, they get downshifted.
         if (pilotState(them) == FULL)
@@ -922,8 +945,13 @@ void doClockMenu(boolean initialize) {
   if (initialize) {
     display.clear();
     display.print(P("Set Clock"));
+#ifdef CLOCK_24HOUR
+    editHour = hour(localTime());
+#else
     editHour = hourFormat12(localTime());
     editMeridian = isPM(localTime())?1:0;
+#endif
+
     editMinute = minute(localTime());
     editDay = day(localTime());
     editMonth = month(localTime());
@@ -935,14 +963,20 @@ void doClockMenu(boolean initialize) {
   if (event == EVENT_SHORT_PUSH) {
     switch(editCursor) {
       case 0: editHour++;
+#ifdef CLOCK_24HOUR
+        if (editHour > 23) editHour = 0;
+#else
         if (editHour > 12) editHour = 1;
+#endif
         break;
       case 1: editMinute++;
         if (editMinute > 59) editMinute = 0;
         break;
+#ifndef CLOCK_24HOUR
       case 2: editMeridian++;
         if (editMeridian > 1) editMeridian = 0;
         break;
+#endif
       case 3: editDay++;
         if (editDay > 31) editDay = 1;
         break;
@@ -956,10 +990,15 @@ void doClockMenu(boolean initialize) {
   }
   if (event == EVENT_LONG_PUSH) {
     if (!initialize) editCursor++;
+#ifdef CLOCK_24HOUR
+    if (editCursor == 2) editCursor++; // skip the meridian
+#endif
     if (editCursor > 5) {
       // convert hour back to 24 hours format
+#ifndef CLOCK_24HOUR
       if (editMeridian == 0 && editHour == 12) editHour = 0;
       if (editMeridian == 1 && editHour != 12) editHour += 12;
+#endif
       tmElements_t tm;
       tm.Year = editYear - 1970;
       tm.Month = editMonth;
@@ -985,24 +1024,32 @@ void doClockMenu(boolean initialize) {
   // render the display
   display.setCursor(0, 1);
   char buf[5];
-  sprintf(buf, "%2d", editHour);
+#ifdef CLOCK_24HOUR
+  sprintf(buf, P("%2d"), editHour);
+#else
+  sprintf(buf, P("%2d"), editHour);
+#endif
   if (editCursor == 0 && blink)
     display.print(P("  "));
   else
     display.print(buf);
   display.print(':');
-  sprintf(buf, "%02d", editMinute);
+  sprintf(buf, P("%02d"), editMinute);
   if (editCursor == 1 && blink)
     display.print(P("  "));
   else
     display.print(buf);
+#ifdef CLOCK_24HOUR
+  display.print(' ');
+#else
   if (editCursor == 2 && blink)
     display.print(' ');
   else if (editMeridian == 0)
     display.print('A');
   else
     display.print('P');
-  sprintf(buf, " %2d", editDay);
+#endif
+  sprintf(buf, P(" %2d"), editDay);
   if (editCursor == 3 && blink)
     display.print(P("   "));
   else
@@ -1013,7 +1060,7 @@ void doClockMenu(boolean initialize) {
   else
     display.print(monthShortStr(editMonth));
   display.print('-');
-  sprintf(buf, "%2d", editYear % 100);
+  sprintf(buf, P("%2d"), editYear % 100);
   if (editCursor == 5 && blink)
     display.print(P("  "));
   else
@@ -1039,24 +1086,32 @@ void doEventMenu(boolean initialize) {
           editDOW = events[editEvent].dow_mask;
           editType = events[editEvent].event_type;
           // Convert to 12 hour time
+#ifndef CLOCK_24HOUR
           editMeridian = (editHour >= 12)?1:0;
           if (editHour == 0)
             editHour = 12;
           else if (editHour > 12)
             editHour -= 12;
+#endif
         }
         break;
       case 1: // the hour
         editHour++;
+#ifdef CLOCK_24HOUR
+        if (editHour > 23) editHour = 0;
+#else
         if (editHour > 12) editHour = 1;
+#endif
         break;
       case 2: // the minute
         editMinute++;
         if (editMinute > 59) editMinute = 0;
         break;
+#ifndef CLOCK_24HOUR
       case 3: // the meridian
         editMeridian = !editMeridian;
         break;
+#endif
       case 4: // Sunday
       case 5: // Monday
       case 6: // Tuesday
@@ -1079,11 +1134,16 @@ void doEventMenu(boolean initialize) {
       return;
     }
     editCursor++;
+#ifdef CLOCK_24HOUR
+    if (editCursor == 3) editCursor++; // skip the meridian
+#endif
     if (editCursor > 11) {
       // convert hour back to 24 hours format
       unsigned char saveHour = editHour;
+#ifndef CLOCK_24HOUR
       if (editMeridian == 0 && saveHour == 12) saveHour = 0;
       if (editMeridian == 1 && saveHour != 12) saveHour += 12;
+#endif
       log(LOG_DEBUG, P("Saving event %d - %d:%d dow_mask %x event %d"), editEvent, saveHour, editMinute, editDOW, editType);
       events[editEvent].hour = saveHour;
       events[editEvent].minute = editMinute;
@@ -1115,22 +1175,30 @@ void doEventMenu(boolean initialize) {
     return;
   }
   char buf[4];
-  sprintf(buf, "%2d", editHour);
+#ifdef CLOCK_24HOUR
+  sprintf(buf, P("%02d"), editHour);
+#else
+  sprintf(buf, P("%2d"), editHour);
+#endif
   if (blink && editCursor == 1)
     display.print(P("  "));
   else
     display.print(buf);
   display.print(':');
-  sprintf(buf, "%02d", editMinute);
+  sprintf(buf, P("%02d"), editMinute);
   if (blink && editCursor == 2)
     display.print(P("  "));
   else
     display.print(buf);
+#ifdef CLOCK_24HOUR
+  display.print(' ');
+#else
   if (blink && editCursor == 3)
     display.print(' ');
   else {
     display.print(editMeridian == 1?'P':'A');
   }
+#endif
   display.print(' ');
   for (unsigned int i = 0; i < strlen(P(DAY_FLAGS)); i++) {
     if (i + 4 == editCursor && blink) {
@@ -1501,7 +1569,11 @@ void loop() {
   // Print the time of day
   display.setCursor(0, 0);
   char buf[17];
+#ifdef CLOCK_24HOUR
+  snprintf(buf, sizeof(buf), P(" %02d:%02d  "), hour(localTime()), minute(localTime()));
+#else
   snprintf(buf, sizeof(buf), P("%2d:%02d%cM "), hourFormat12(localTime()), minute(localTime()), isPM(localTime())?'P':'A');
+#endif
   display.print(buf);
   
   if (paused) {
@@ -1535,7 +1607,7 @@ void loop() {
       } else {
         // We're paused. We will fix up the display ourselves.
         display.setCursor(0, 1);
-        display.print("A: ---  ");
+        display.print(P("A: ---  "));
       }
       // fall through...
     case STATE_B:
@@ -1549,7 +1621,7 @@ void loop() {
       }
       if (paused && car_a_state == STATE_B) {
         display.setCursor(0, 1);
-        display.print("A: off  ");
+        display.print(P("A: off  "));
       }
       break;
     }
@@ -1581,7 +1653,7 @@ void loop() {
       } else {
         // We're paused. We will fix up the display ourselves.
         display.setCursor(8, 1);
-        display.print("B: ---  ");
+        display.print(P("B: ---  "));
       }
       // fall through...
     case STATE_B:
@@ -1595,7 +1667,7 @@ void loop() {
       }
       if (paused && car_b_state == STATE_B) {
         display.setCursor(8, 1);
-        display.print("B: off  ");
+        display.print(P("B: off  "));
       }
       break;
     }
@@ -1620,14 +1692,14 @@ void loop() {
         setPilot(CAR_B, FULL);
         sequential_pilot_timeout = now;
         display.setCursor(0, 1);
-        display.print("A: wait B: off  ");
+        display.print(P("A: wait B: off  "));
       } else if (pilot_state_b == FULL) {
         log(LOG_INFO, P("Sequential mode offer timeout, moving offer to %s"), car_str(CAR_A));
         setPilot(CAR_B, HIGH);
         setPilot(CAR_A, FULL);
         sequential_pilot_timeout = now;
         display.setCursor(0, 1);
-        display.print("A: off  B: wait ");
+        display.print(P("A: off  B: wait "));
       }
     }
   }
@@ -1737,7 +1809,7 @@ void loop() {
     car_a_request_time = 0;
     setRelay(CAR_A, HIGH);
     display.setCursor(0, 1);
-    display.print("A: ON   ");
+    display.print(P("A: ON   "));
   }
   if (car_a_error_time != 0 && (millis() - car_a_error_time) > ERROR_DELAY) {
     log(LOG_INFO, P("Power withdrawn after error delay on car A"));
@@ -1752,7 +1824,7 @@ void loop() {
     car_b_request_time = 0;
     setRelay(CAR_B, HIGH);
     display.setCursor(8, 1);
-    display.print("B: ON   ");
+    display.print(P("B: ON   "));
   }
   if (car_b_error_time != 0 && (millis() - car_b_error_time) > ERROR_DELAY) {
     log(LOG_INFO, P("Power withdrawn after error delay on car B"));
