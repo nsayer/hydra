@@ -8,9 +8,15 @@ HARDWARE SPECIFICATION
 
 The Hydra is based on the Arduino Uno platform, which is itself based on a 16 MHz 5V Amtel ATmega328.
 
-The incoming J1772 pilot signal is normalized to TTL levels and fed into digital pin 2. The software will
-configure interrupt 0 to trigger on any change. This will be used to detect the incoming duty cycle, and
-thus the current availability.
+There are currently two basic hardware variants. The traditional variant is the "splitter." It has a J1772
+inlet and the incoming J1772 pilot signal is normalized to TTL levels and fed into digital pin 2. The software
+will configure interrupt 0 to trigger on any change. This will be used to detect the incoming duty cycle, and
+thus the current availability. The proximity pin on the inlet is also fed into a comparator to detect
+proximity transitions and transmit them quickly to the cars.
+
+The other variant is the EVSE. In that version, the inlet processing is traded for a GFI and a real-time clock
+chip. There's also a GFI test line that is rapidly pulsed at startup to induce a GFI interrupt to insure it's
+working.
 
 Two of the digital pins will be set up with ordinary open collector transistor triggers to turn on power
 relays for each car. Two of the other digital pins will be configured with custom PWM timer setups (via the
@@ -24,10 +30,12 @@ are taken by the i2c system, which will communicate with an LCD shield (via the 
 SOFTWARE SPECIFICATION
 ----------------------
 
-The basic rule of thumb is that the outgoing pilot signal to any given car is the same as the incoming pilot
-as long as the other car is not also charging. The other rule is that if one car is charging and the other
-wants to begin charging, it must wait while the other car's pilot is reduced and given time to reduce its
-consumption accordingly.
+There are two operating modes - shared and sequential.
+
+In shared mode, the basic rule of thumb is that the outgoing pilot signal to any given car is the same as the
+incoming pilot as long as the other car is not also charging. The other rule is that if one car is charging
+and the other wants to begin charging, it must wait while the other car's pilot is reduced and given time to
+reduce its consumption accordingly.
 
 To start with, neither car is connected. Both outgoing pilots are pegged at +12v. First one car is connected
 and it transitions to state B. Its pilot begins at full power. The other car is then connected and its pilot
@@ -37,6 +45,10 @@ while the first car's pilot is reduced to half power. After the waiting period, 
 will have already been at half power when the first car originally powered up).
 
 When either car turns off, the other car's pilot will be switched back to full power.
+
+In sequential mode, one car is given a full power pilot, and the other car is given no pilot at all. When the
+first car is finished, the two cars "switch," giving the other car a chance to charge. If neither car wants to
+charge, the pilot will switch cars every five minutes just on the off chance one of the cars changes its mind.
 
 If either car over-draws its current allocation, it will be given 5 seconds to correct. If it remains overcurrent
 for 5 seconds, or if it fails a diode check at any time, or its positive pilot moves into an undefined state,
@@ -64,8 +76,6 @@ results get printed out.
 HARDWARE
 --------
 
-The boards can be ordered from OSHPark at http://oshpark.com/profiles/nsayer
+You can buy quick kits and assembled boards at http://store.geppettoelectronics.com/
 
-There are two DigiKey BOM files that you can use to buy all the parts to build a Hydra. That, and the
-Eagle .sch and .brd files and a PDF schematic are available at http://www.kfu.com/~nsayer/hydra/
-
+The boards can be ordered from OSHPark at http://oshpark.com/profiles/nsayer if you want to build your own.
