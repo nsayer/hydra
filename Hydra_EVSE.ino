@@ -144,11 +144,6 @@
 // 5000 ms.
 #define TRANSITION_DELAY 4500
 
-// This is the minimum of the ampacity (in milliamps) of all of the components from the distribution block to the plug -
-// the wire to the relay, the relay itself, and the J1772 cable and plug. This is not part of the UI, because it's never
-// going to change once you build your Hydra.
-#define MAXIMUM_OUTLET_CURRENT 30000
-
 // Amount of time, in milliseconds, we will look for positive and negative peaks on the car
 // pilot pins. It takes around .1 ms to do one read, so we should get a bit less than 200 chances
 // this way.
@@ -172,6 +167,14 @@
 // How often (in milliseconds) is the current draw by a car logged?
 #define CURRENT_LOG_INTERVAL 1000
 
+// This is the minimum of the ampacity (in milliamps) of all of the components from the distribution block to the plug -
+// the wire to the relay, the relay itself, and the J1772 cable and plug. This is not part of the UI, because it's never
+// going to change once you build your Hydra.
+// reference design
+#define MAXIMUM_OUTLET_CURRENT 30000
+// Mega hydra
+//#define MAXIMUM_OUTLET_CURRENT 50000
+
 // This multiplier is the number of milliamps per A/d converter unit.
 
 // First, you need to select the burden resistor for the CT. You choose the largest value possible such that
@@ -187,7 +190,14 @@
 
 // Each count of the A/d converter is 4.882 mV (5/1024). V/A divided by V/unit is unit/A. For the reference
 // design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get 88.7625558. Round near...
-#define CURRENT_SCALE_FACTOR 89
+// for RB = 56 - original design
+//#define CURRENT_SCALE_FACTOR 89
+// for RB = 47 - current reference design
+#define CURRENT_SCALE_FACTOR 106
+// for RB = 32 - Mega Hydra prototype
+//#define CURRENT_SCALE_FACTOR 155
+// doe RB = 27 - Mega Hydra production
+//#define CURRENT_SCALE_FACTOR 184
 
 #define LOG_NONE 0
 #define LOG_INFO 1
@@ -328,7 +338,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.4 (EVSE)"
+#define VERSION "2.0.5 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -845,6 +855,7 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         *car_request_time = millis();
         // Drop car A down to 50%
         setPilot(them, HALF);
+        setPilot(us, HALF); // this is redundant unless we are transitioning from A to C suddenly.
         display.setCursor((us == CAR_A)?0:8, 1);
         display.print((us == CAR_A)?"A":"B");
         display.print(P(": wait "));
@@ -852,7 +863,7 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         // if they're not charging, then we can just go. If they have a full pilot, they get downshifted.
         if (pilotState(them) == FULL)
           setPilot(them, HALF);
-        setPilot(us, FULL);
+        setPilot(us, FULL); // this is redundant unless we are going directly from A to C.
         setRelay(us, HIGH);
         *car_request_time = 0;
         display.setCursor((us == CAR_A)?0:8, 1);
@@ -1722,7 +1733,7 @@ void loop() {
   // attempt to reduce it to half power (and the other car has not yet
   // been turned on), so we must error them out before letting the other
   // car start.
-  if (isCarCharging(CAR_A) && car_a_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
+  if (relay_state_a == HIGH && last_car_a_state != STATE_E) { // Only check the ammeter if the power is actually on and we're not errored
     unsigned long car_a_draw = readCurrent(CAR_A);
 
     {
@@ -1762,7 +1773,7 @@ void loop() {
     memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
   }
 
-  if (isCarCharging(CAR_B) && car_b_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
+  if (relay_state_b == HIGH && last_car_b_state != STATE_E) { // Only check the ammeter if the power is actually on and we're not errored
     unsigned long car_b_draw = readCurrent(CAR_B);
 
     {
@@ -1812,9 +1823,15 @@ void loop() {
     display.print(P("A: ON   "));
   }
   if (car_a_error_time != 0 && (millis() - car_a_error_time) > ERROR_DELAY) {
-    log(LOG_INFO, P("Power withdrawn after error delay on car A"));
     car_a_error_time = 0;
     setRelay(CAR_A, LOW);
+    if (paused) {
+      display.setCursor(0, 1);
+      display.print(P("A: off  "));
+      log(LOG_INFO, P("Power withdrawn after pause delay on car A"));
+    } else {
+      log(LOG_INFO, P("Power withdrawn after error delay on car A"));
+    }
     if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
         setPilot(CAR_B, FULL);
   }
@@ -1827,9 +1844,14 @@ void loop() {
     display.print(P("B: ON   "));
   }
   if (car_b_error_time != 0 && (millis() - car_b_error_time) > ERROR_DELAY) {
-    log(LOG_INFO, P("Power withdrawn after error delay on car B"));
     car_b_error_time = 0;
     setRelay(CAR_B, LOW);
+    if (paused) {
+      display.setCursor(8, 1);
+      display.print(P("B: off  "));
+      log(LOG_INFO, P("Power withdrawn after pause delay on car B"));
+    } else
+      log(LOG_INFO, P("Power withdrawn after error delay on car B"));
     if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
         setPilot(CAR_A, FULL);
   }
@@ -1861,6 +1883,5 @@ void loop() {
   }
   
 }
-
 
 
