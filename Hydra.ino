@@ -191,16 +191,17 @@
 // the maximum peak-to-peak voltage for the current range is 5 volts. To obtain this value, divide the maximum
 // outlet current by the Te. That value is the maximum CT current RMS. You must convert that to P-P, so multiply
 // by 2*sqrt(2). Divide 5 by that value and select the next lower standard resistor value. For the reference
-// design, Te is 1018 and the outlet maximum is 30. 5/((30/1018)*2*sqrt(2)) = 59.995, so a 56 ohm resistor
-// is called for. Call this value Rb (burden resistor).
+// design, Te is 1018 and the outlet maximum is 30. 5/((30/1018)*2*sqrt(2)) = 59.995. Some cars, however,
+// have non-sinusoidal current draws for an equivalent RMS value, but we don't want to clip those peaks,
+// so a 47 ohm resistor is called for. Call this value Rb (burden resistor).
 
 // Next, one must use Te and Rb to determine the volts-per-amp value. Note that the readCurrent()
 // method calculates the RMS value before the scaling factor, so RMS need not be taken into account.
-// (1 / Te) * Rb = Rb / Te = Volts per Amp. For the reference design, that's 55.009 mV.
+// (1 / Te) * Rb = Rb / Te = Volts per Amp. For the reference design, that's 46.169 mV.
 
 // Each count of the A/d converter is 4.882 mV (5/1024). V/A divided by V/unit is unit/A. For the reference
-// design, that's 11.26. But we want milliamps per unit, so divide that into 1000 to get...
-#define CURRENT_SCALE_FACTOR 88.7625558
+// design, that's 9.46. But we want milliamps per unit, so divide that into 1000. Round up to get...
+#define CURRENT_SCALE_FACTOR 106
 
 #define LOG_NONE 0
 #define LOG_INFO 1
@@ -254,7 +255,7 @@
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "1.1.0"
+#define VERSION "1.1.1"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -301,7 +302,7 @@ void log(unsigned int level, const char * fmt_str, ...) {
 #endif
 }
 
-inline const char *car_str(unsigned int car) {
+static inline const char *car_str(unsigned int car) {
   switch(car) {
     case CAR_A: return "car A";
     case CAR_B: return "car B";
@@ -310,7 +311,7 @@ inline const char *car_str(unsigned int car) {
   }
 }
 
-inline const char *logic_str(unsigned int state) {
+static inline const char *logic_str(unsigned int state) {
   switch(state) {
     case LOW: return "LOW";
     case HIGH: return "HIGH";
@@ -320,7 +321,7 @@ inline const char *logic_str(unsigned int state) {
   }
 }
 
-inline const char* state_str(unsigned int state) {
+static inline const char* state_str(unsigned int state) {
   switch(state) {
   case STATE_A: 
     return "A";
@@ -341,7 +342,7 @@ inline const char* state_str(unsigned int state) {
 // Convert the microsecond state timings from the incoming pilot into
 // an instantaneous current allowance value. With polling, it's
 // the two sample counts, but the math winds up being exactly the same.
-inline unsigned long timeToMA(unsigned long samplesHigh, unsigned long samplesLow) {
+static inline unsigned long timeToMA(unsigned long samplesHigh, unsigned long samplesLow) {
   // Calculate the duty cycle in mils (tenths of a percent)
   unsigned int duty = (samplesHigh * 1000) / (samplesHigh + samplesLow);
   if (duty < 80) { // < 8% is an error (digital comm not supported)
@@ -361,7 +362,7 @@ inline unsigned long timeToMA(unsigned long samplesHigh, unsigned long samplesLo
 
 // Convert a milliamp allowance into an outgoing pilot duty cycle.
 // In lieu of floating point, this is duty in mils (tenths of a percent)
-inline static unsigned int MAToDuty(unsigned long milliamps) {
+static inline unsigned int MAToDuty(unsigned long milliamps) {
   if (milliamps < 6000) {
     return 9999; // illegal - set pilot to "high"
   } 
@@ -378,7 +379,7 @@ inline static unsigned int MAToDuty(unsigned long milliamps) {
 
 // Convert a milliamp allowance into a value suitable for
 // pwmWrite - a scale from 0 to 255.
-inline static unsigned int MAtoPwm(unsigned long milliamps) {
+static inline unsigned int MAtoPwm(unsigned long milliamps) {
   unsigned int out = MAToDuty(milliamps);
 
   if (out >= 1000) return 255; // full on
@@ -441,13 +442,13 @@ void error(unsigned int car, char err) {
     display.setCursor(0, 1);
     display.print(P("A:ERR "));
     display.print(err);
-    display.print(P(" "));
+    display.print(' ');
   }
   if (car == BOTH || car == CAR_B) {
     display.setCursor(8, 1);
     display.print(P("B:ERR "));
     display.print(err);
-    display.print(P(" "));
+    display.print(' ');
   }
 
   log(LOG_INFO, P("Error %c on %s"), err, car_str(car));
@@ -470,7 +471,7 @@ void setRelay(unsigned int car, unsigned int state) {
 // If it's in an error state, it's not charging (the relay may still be on during error delay).
 // If it's in a transition delay, then it's "charging" (the relay is off during transition delay).
 // Otherwise, check the state of the relay.
-inline boolean isCarCharging(unsigned int car) {
+static inline boolean isCarCharging(unsigned int car) {
   if (paused) return false;
   switch(car) {
   case CAR_A:
@@ -522,7 +523,7 @@ void setPilot(unsigned int car, unsigned int which) {
   }
 }
 
-inline static unsigned int pilotState(unsigned int car) {
+static inline unsigned int pilotState(unsigned int car) {
   return (car == CAR_A)?pilot_state_a:pilot_state_b;
 }
 
@@ -561,6 +562,15 @@ int checkState(unsigned int car) {
   return STATE_E;
 }
 
+static inline unsigned long ulong_sqrt(unsigned long in) {
+  unsigned long out;
+  // find the last int whose square is not too big
+  // Yes, it's wasteful, but we only theoretically ever have to go to 512.
+  // Removing floating point saves us almost 1K of flash.
+  for(out = 1; out*out <= in; out++) ;
+  return out - 1;
+}
+
 unsigned long readCurrent(unsigned int car) {
   unsigned int car_pin = (car == CAR_A) ? CAR_A_CURRENT_PIN : CAR_B_CURRENT_PIN;
   unsigned long sum = 0;
@@ -594,7 +604,7 @@ unsigned long readCurrent(unsigned int car) {
     case 3:
       // The answer is the square root of the mean of the squares.
       // But additionally, that value must be scaled to a real current value.
-      return (unsigned long)(sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR);
+      return ulong_sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR;
     }
   }
   // ran out of time. Assume that it's simply not oscillating any. 
@@ -615,7 +625,7 @@ unsigned long rollRollingAverage(unsigned long array[], unsigned long new_value)
 #endif
 }
 
-inline void reportIncomingPilot(unsigned long milliamps) {
+static inline void reportIncomingPilot(unsigned long milliamps) {
 
   milliamps = rollRollingAverage(incoming_pilot_samples, milliamps);
   // Clamp to the maximum allowable current
@@ -800,6 +810,7 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         *car_request_time = millis();
         // Drop car A down to 50%
         setPilot(them, HALF);
+        setPilot(us, HALF); // this is redundant unless we are transitioning from A directly to C
         display.setCursor((us == CAR_A)?0:8, 1);
         display.print((us == CAR_A)?"A":"B");
         display.print(": wait ");
@@ -807,7 +818,7 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         // if they're not charging, then we can just go. If they have a full pilot, they get downshifted.
         if (pilotState(them) == FULL)
           setPilot(them, HALF);
-        setPilot(us, FULL);
+        setPilot(us, FULL); // this is redundant unless we are transitioning from A directly to C
         setRelay(us, HIGH);
         *car_request_time = 0;
         display.setCursor((us == CAR_A)?0:8, 1);
@@ -1189,7 +1200,7 @@ void loop() {
   // attempt to reduce it to half power (and the other car has not yet
   // been turned on), so we must error them out before letting the other
   // car start.
-  if (isCarCharging(CAR_A) && car_a_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
+  if (relay_state_a == HIGH && last_car_a_state != STATE_E) { // Only check the ammeter if the power is actually on and we're not errored
     unsigned long car_a_draw = readCurrent(CAR_A);
 
     {
@@ -1229,7 +1240,7 @@ void loop() {
     memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
   }
 
-  if (isCarCharging(CAR_B) && car_b_request_time == 0) { // Only check the ammeter if the car is charging and NOT in transition delay
+  if (relay_state_b == HIGH && last_car_b_state != STATE_E) { // Only check the ammeter if the power is actually on and we're not errored
     unsigned long car_b_draw = readCurrent(CAR_B);
 
     {
@@ -1279,9 +1290,15 @@ void loop() {
     display.print("A: ON   ");
   }
   if (car_a_error_time != 0 && (millis() - car_a_error_time) > ERROR_DELAY) {
-    log(LOG_INFO, P("Power withdrawn after error delay on car A"));
     car_a_error_time = 0;
     setRelay(CAR_A, LOW);
+    if (paused) {
+      display.setCursor(0, 1);
+      display.print(P("A: off  "));
+      log(LOG_INFO, P("Power withdrawn after pause delay on car A"));
+    } else {
+      log(LOG_INFO, P("Power withdrawn after error delay on car A"));
+    }
     if (isCarCharging(CAR_B) || last_car_b_state == STATE_B)
         setPilot(CAR_B, FULL);
   }
@@ -1294,9 +1311,15 @@ void loop() {
     display.print("B: ON   ");
   }
   if (car_b_error_time != 0 && (millis() - car_b_error_time) > ERROR_DELAY) {
-    log(LOG_INFO, P("Power withdrawn after error delay on car B"));
     car_b_error_time = 0;
     setRelay(CAR_B, LOW);
+    if (paused) {
+      display.setCursor(8, 1);
+      display.print(P("B: off  "));
+      log(LOG_INFO, P("Power withdrawn after pause delay on car B"));
+    } else {
+      log(LOG_INFO, P("Power withdrawn after error delay on car B"));
+    }
     if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
         setPilot(CAR_A, FULL);
   }
