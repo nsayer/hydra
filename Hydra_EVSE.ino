@@ -338,7 +338,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.5 (EVSE)"
+#define VERSION "2.0.6 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -1720,7 +1720,7 @@ void loop() {
     if (now - last_state_log > STATE_LOG_INTERVAL) {
       last_state_log = now;
       log(LOG_INFO, P("States: Car A, %s; Car B, %s"), state_str(last_car_a_state), state_str(last_car_b_state));
-      log(LOG_INFO, P("Incoming pilot %s"), formatMilliamps(incomingPilotMilliamps));
+      log(LOG_INFO, P("Power available %lu mA"), incomingPilotMilliamps);
     }
   }
    
