@@ -41,6 +41,19 @@
 // If, for some reason, your wiring layout differs, then...
 // #define SWAP_CARS 1
 
+// If your Hydra lacks the Relay test functionality, comment this out
+#define RELAY_TEST
+
+#ifdef RELAY_TEST
+// After the relay changes state, don't bomb on relay errors for this long.
+#define RELAY_TEST_GRACE_TIME 500
+
+// This is the relay test pin for car A
+#define RELAY_TEST_PIN_A 6
+// The same for car B
+#define RELAY_TEST_PIN_B 5
+#endif
+
 // ---------- DIGITAL PINS ----------
 #define GFI_PIN                 2
 #define GFI_IRQ                 0
@@ -317,8 +330,11 @@ unsigned char currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40, 44, 5
 // the month, and the hour of the day. The last parameter is the offset in minutes. You should
 // have the "winter" rule have a 0 offset so that turning off DST returns you to winter time.
 // The summer offset should be relative to winter time (probably +60 minutes).
+#if 1
+// US rules
 TimeChangeRule summer = { "DST", Second, Sun, Mar, 2, 60 };
 TimeChangeRule winter = { "ST", First, Sun, Nov, 2, 0 };
+#endif
 #if 0
 // European Union
 TimeChangeRule summer = { "DST", Last, Sun, Mar, 1, 60 };
@@ -338,7 +354,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.6 (EVSE)"
+#define VERSION "2.0.7 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -354,6 +370,9 @@ unsigned long sequential_pilot_timeout;
 unsigned int relay_state_a, relay_state_b, pilot_state_a, pilot_state_b;
 unsigned int operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
+#ifdef RELAY_TEST
+unsigned long relay_change_time;
+#endif
 boolean paused = false;
 boolean enterPause = false;
 boolean inMenu = false;
@@ -541,6 +560,9 @@ void gfi_trigger() {
 }
 
 void setRelay(unsigned int car, unsigned int state) {
+#ifdef RELAY_TEST
+  relay_change_time = millis();
+#endif
   log(LOG_DEBUG, P("Setting %s relay to %s"), car_str(car), logic_str(state));
   switch(car) {
   case CAR_A:
@@ -1431,6 +1453,11 @@ void setup() {
   pinMode(CAR_B_PILOT_OUT_PIN, OUTPUT);
   pinMode(CAR_A_RELAY, OUTPUT);
   pinMode(CAR_B_RELAY, OUTPUT);
+#ifdef RELAY_TEST
+  pinMode(RELAY_TEST_PIN_A, INPUT_PULLUP);
+  pinMode(RELAY_TEST_PIN_B, INPUT_PULLUP);
+  relay_change_time = 0;
+#endif
 
   // Enter state A on both cars
   setPilot(CAR_A, HIGH);
@@ -1534,6 +1561,19 @@ void loop() {
     error(BOTH, 'G');
     gfiTriggered = false;
   }
+  
+#ifdef RELAY_TEST
+  if (relay_change_time != 0) {
+    if (millis() > relay_change_time + RELAY_TEST_GRACE_TIME)
+      relay_change_time = 0;
+  } else {
+    // The relay test output is active-low.
+    if (digitalRead(RELAY_TEST_PIN_A) == relay_state_a)
+      error(CAR_A, 'R');
+    if (digitalRead(RELAY_TEST_PIN_B) == relay_state_b)
+      error(CAR_B, 'R');
+  }
+#endif
 
   // Update the display
   if (last_car_a_state == STATE_E || last_car_b_state == STATE_E) {
