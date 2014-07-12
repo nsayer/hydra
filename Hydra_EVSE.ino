@@ -112,7 +112,6 @@
 
 #define GFI_TEST_CYCLES 50 // 50 cycles
 #define GFI_PULSE_DURATION_MS 8000 // of roughly 60 Hz. - 8 ms as a half-cycle
-#define GFI_TEST_CLEAR_TIME 250 // Takes the GFCI this long to clear
 
 // These are the expected analogRead() ranges for pilot read-back from the cars.
 // These are calculated from the expected voltages seen through the dividor network,
@@ -354,7 +353,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.7 (EVSE)"
+#define VERSION "2.0.7.1 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -965,7 +964,7 @@ void gfiSelfTest() {
     display.print(P("GFI Test Failure"));
     while(true); // and goodnight
   }
-  delay(GFI_TEST_CLEAR_TIME);
+  while(digitalRead(GFI_PIN) == HIGH) ; // just wait until it settles.
   gfiTriggered = false;
 }
 
