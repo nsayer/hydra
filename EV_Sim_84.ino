@@ -20,7 +20,7 @@
 
 #include <Arduino.h>
 
-#define VERSION "(84) 0.1"
+#define VERSION "(84) 0.2"
 
 // The pins connected up to the LCD.
 #define LCD_D4 7
@@ -28,7 +28,6 @@
 #define LCD_D6 5
 #define LCD_D7 4
 #define LCD_RS 3
-#define LCD_RW 2
 #define LCD_E 1
 
 #define PILOT_DIGITAL_SAMPLING_PIN  0
@@ -38,12 +37,12 @@
 #include <LiquidCrystal.h>
 
 // Turn on auto-detect
-LiquidCrystal display(LCD_RS, LCD_RW, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
+LiquidCrystal display(LCD_RS, LCD_E, LCD_D4, LCD_D5, LCD_D6, LCD_D7);
 
 // special return result for the 'digital communications' pilot.
 #define DIGITAL_COMM_REQD 999999
 // duty is tenths-of-a-percent (that is, fraction out of 1000).
-inline unsigned long dutyToMA(unsigned long duty) {
+static inline unsigned long dutyToMA(unsigned long duty) {
   // Cribbed from the spec - grant a +/-2% slop
   if (duty < 30) {
     // < 3% is an error
