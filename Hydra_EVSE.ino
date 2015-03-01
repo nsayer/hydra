@@ -41,49 +41,74 @@
 // If, for some reason, your wiring layout differs, then...
 // #define SWAP_CARS 1
 
+// If your Hydra lacks the ground test functionality, comment this out
+#define GROUND_TEST
+
 // If your Hydra lacks the Relay test functionality, comment this out
 #define RELAY_TEST
 
-#ifdef RELAY_TEST
-// After the relay changes state, don't bomb on relay errors for this long.
-#define RELAY_TEST_GRACE_TIME 500
+#ifdef GROUND_TEST
 
-// This is the relay test pin for car A
-#define RELAY_TEST_PIN_A 6
-// The same for car B
-#define RELAY_TEST_PIN_B 5
+// This must be high at all times while charging either car, or else it's a ground failure.
+#define GROUND_TEST_PIN 6
+
 #endif
 
-// ---------- DIGITAL PINS ----------
+// After the relay changes state, don't bomb on relay or ground errors for this long.
+#define RELAY_TEST_GRACE_TIME 500
+
 #define GFI_PIN                 2
 #define GFI_IRQ                 0
 
 #define GFI_TEST_PIN            3
 
 #ifndef SWAP_CARS
+// ---------- DIGITAL PINS ----------
 #define CAR_A_PILOT_OUT_PIN     10
 #define CAR_B_PILOT_OUT_PIN     9
 
 #define CAR_A_RELAY             8
 #define CAR_B_RELAY             7
 
+#ifdef RELAY_TEST
+#define CAR_A_RELAY_TEST        A3
+#define CAR_B_RELAY_TEST        A2
+#endif
+
 // ---------- ANALOG PINS ----------
 #define CAR_A_PILOT_SENSE_PIN   1
 #define CAR_B_PILOT_SENSE_PIN   0
+#ifdef RELAY_TEST
+// When the relay test was added, the current pins were moved.
+#define CAR_A_CURRENT_PIN       7
+#define CAR_B_CURRENT_PIN       6
+#else
 #define CAR_A_CURRENT_PIN       3
 #define CAR_B_CURRENT_PIN       2
+#endif
 #else
+// ---------- DIGITAL PINS ----------
 #define CAR_A_PILOT_OUT_PIN     9
 #define CAR_B_PILOT_OUT_PIN     10
 
 #define CAR_A_RELAY             7
 #define CAR_B_RELAY             8
 
+#ifdef RELAY_TEST
+#define CAR_A_RELAY_TEST        A2
+#define CAR_B_RELAY_TEST        A3
+#endif
+
 // ---------- ANALOG PINS ----------
 #define CAR_A_PILOT_SENSE_PIN   0
 #define CAR_B_PILOT_SENSE_PIN   1
+#ifdef RELAY_TEST
+#define CAR_A_CURRENT_PIN       6
+#define CAR_B_CURRENT_PIN       7
+#else
 #define CAR_A_CURRENT_PIN       2
 #define CAR_B_CURRENT_PIN       3
+#endif
 #endif
 
 #if 0
@@ -112,6 +137,7 @@
 
 #define GFI_TEST_CYCLES 50 // 50 cycles
 #define GFI_PULSE_DURATION_MS 8000 // of roughly 60 Hz. - 8 ms as a half-cycle
+#define GFI_TEST_CLEAR_TIME 250 // Takes the GFCI this long to clear
 
 // These are the expected analogRead() ranges for pilot read-back from the cars.
 // These are calculated from the expected voltages seen through the dividor network,
@@ -195,7 +221,12 @@
 // by 2*sqrt(2). Divide 5 by that value and select the next lower standard resistor value. For the reference
 // design, Te is 1018 and the outlet maximum is 30. 5/((30/1018)*2*sqrt(2)) = 59.995, so a 56 ohm resistor
 // is called for. Call this value Rb (burden resistor).
-
+//
+// Note, however, that the 56 ohm value assumes that the RMS-to-peak conversion is from a sine wave. That's
+// not necessarily the case. Most battery chargers are going to be switching power supplies, which may have
+// more complex waveforms. So it's best to pick the next lower standard resistor value to give a little bit
+// of headroom. That's why the recommended values changed from 56 to 47 ohms and 32 to 27 ohms.
+//
 // Next, one must use Te and Rb to determine the volts-per-amp value. Note that the readCurrent()
 // method calculates the RMS value before the scaling factor, so RMS need not be taken into account.
 // (1 / Te) * Rb = Rb / Te = Volts per Amp. For the reference design, that's 55.009 mV.
@@ -353,7 +384,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.0.7.1 (EVSE)"
+#define VERSION "2.2 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -369,9 +400,10 @@ unsigned long sequential_pilot_timeout;
 unsigned int relay_state_a, relay_state_b, pilot_state_a, pilot_state_b;
 unsigned int operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
-#ifdef RELAY_TEST
-unsigned long relay_change_time;
+#ifdef GROUND_TEST
+unsigned char current_ground_status;
 #endif
+unsigned long relay_change_time;
 boolean paused = false;
 boolean enterPause = false;
 boolean inMenu = false;
@@ -559,9 +591,11 @@ void gfi_trigger() {
 }
 
 void setRelay(unsigned int car, unsigned int state) {
-#ifdef RELAY_TEST
+  if (relay_state_a == LOW && relay_state_b == LOW && state == HIGH) {
+    // We're transitioning from no car to one car - insert a GFI self test.
+    gfiSelfTest();
+  }
   relay_change_time = millis();
-#endif
   log(LOG_DEBUG, P("Setting %s relay to %s"), car_str(car), logic_str(state));
   switch(car) {
   case CAR_A:
@@ -949,7 +983,7 @@ unsigned int checkEvent() {
   }
 }
 
-void gfiSelfTest() {
+static void gfiSelfTest() {
   gfiTriggered = false;
   for(int i = 0; i < GFI_TEST_CYCLES; i++) {
     digitalWrite(GFI_TEST_PIN, HIGH);
@@ -962,9 +996,20 @@ void gfiSelfTest() {
     display.setBacklight(RED);
     display.clear();
     display.print(P("GFI Test Failure"));
+    display.setCursor(0, 1);
+    display.print(P("Stuck clear"));
     while(true); // and goodnight
   }
-  while(digitalRead(GFI_PIN) == HIGH) ; // just wait until it settles.
+  unsigned long clearStart = millis();
+  while(digitalRead(GFI_PIN) == HIGH) 
+    if (millis() > clearStart + GFI_TEST_CLEAR_TIME) {
+      display.setBacklight(RED);
+      display.clear();
+      display.print(P("GFI Test Failure"));
+      display.setCursor(0, 1);
+      display.print(P("Stuck set"));
+      while(true); // and goodnight
+    }
   gfiTriggered = false;
 }
 
@@ -1452,10 +1497,12 @@ void setup() {
   pinMode(CAR_B_PILOT_OUT_PIN, OUTPUT);
   pinMode(CAR_A_RELAY, OUTPUT);
   pinMode(CAR_B_RELAY, OUTPUT);
+#ifdef GROUND_TEST
+  pinMode(GROUND_TEST_PIN, INPUT);
+#endif
 #ifdef RELAY_TEST
-  pinMode(RELAY_TEST_PIN_A, INPUT_PULLUP);
-  pinMode(RELAY_TEST_PIN_B, INPUT_PULLUP);
-  relay_change_time = 0;
+  pinMode(CAR_A_RELAY_TEST, INPUT);
+  pinMode(CAR_B_RELAY_TEST, INPUT);
 #endif
 
   // Enter state A on both cars
@@ -1479,7 +1526,8 @@ void setup() {
   button_press_time = 0;
   sequential_pilot_timeout = 0;
   last_minute = 99;
-  
+  relay_change_time = 0;
+
   operatingMode = EEPROM.read(EEPROM_LOC_MODE);
   if (operatingMode > LAST_MODE) {
     operatingMode = DEFAULT_MODE;
@@ -1538,6 +1586,29 @@ void setup() {
   delay(2000); // let the splash screen show
   display.clear();
   gfiSelfTest();
+  
+#if 0 // ground test is now only active while charging
+  if (digitalRead(GROUND_TEST_PIN) != HIGH) {
+    display.setBacklight(RED);
+    display.clear();
+    display.print(P("Ground Test Failure"));
+    while(true); // and goodnight
+  }
+#endif
+#ifdef RELAY_TEST
+  {
+    boolean test_a = digitalRead(CAR_A_RELAY_TEST) == HIGH;
+    boolean test_b = digitalRead(CAR_B_RELAY_TEST) == HIGH;
+    if (test_a || test_b) {
+      display.setBacklight(RED);
+      display.clear();
+      display.print(P("Relay Test Failure: "));
+      if (test_a) display.print('A');
+      if (test_b) display.print('B');
+      while(true); // and goodnight
+    }
+  }
+#endif
 }
 
 void loop() {
@@ -1560,20 +1631,37 @@ void loop() {
     error(BOTH, 'G');
     gfiTriggered = false;
   }
-  
-#ifdef RELAY_TEST
-  if (relay_change_time != 0) {
-    if (millis() > relay_change_time + RELAY_TEST_GRACE_TIME)
-      relay_change_time = 0;
-  } else {
-    // The relay test output is active-low.
-    if (digitalRead(RELAY_TEST_PIN_A) == relay_state_a)
-      error(CAR_A, 'R');
-    if (digitalRead(RELAY_TEST_PIN_B) == relay_state_b)
-      error(CAR_B, 'R');
+
+#ifdef GROUND_TEST
+  if ((relay_state_a == HIGH || relay_state_b == HIGH) && relay_change_time == 0) {
+    unsigned char ground = digitalRead(GROUND_TEST_PIN) == HIGH;
+    if (ground != current_ground_status) {
+      current_ground_status = ground;
+      if (!ground) {
+        // we've just noticed a ground failure.
+        log(LOG_INFO, P("Ground failure detected"));
+        error(BOTH, 'F');
+      }
+    }
   }
 #endif
 
+#ifdef RELAY_TEST
+  if (relay_change_time == 0) {
+    // The relay test outputs should match the relay pin state (modulo change delay).
+    if ((digitalRead(CAR_A_RELAY_TEST) == HIGH) != (relay_state_a == HIGH)) {
+      log(LOG_INFO, P("Relay fault detected on car A"));
+      error(CAR_A, 'R');    
+    }
+    if ((digitalRead(CAR_B_RELAY_TEST) == HIGH) != (relay_state_b == HIGH)) {
+      log(LOG_INFO, P("Relay fault detected on car B"));
+      error(CAR_B, 'R');
+    }
+  }
+#endif
+  if (relay_change_time != 0 && millis() > relay_change_time + RELAY_TEST_GRACE_TIME)
+    relay_change_time = 0;
+    
   // Update the display
   if (last_car_a_state == STATE_E || last_car_b_state == STATE_E) {
     // One or both cars in error state
@@ -1619,11 +1707,15 @@ void loop() {
   // Print the time of day
   display.setCursor(0, 0);
   char buf[17];
+  if (RTC.isRunning()) {
 #ifdef CLOCK_24HOUR
   snprintf(buf, sizeof(buf), P(" %02d:%02d  "), hour(localTime()), minute(localTime()));
 #else
   snprintf(buf, sizeof(buf), P("%2d:%02d%cM "), hourFormat12(localTime()), minute(localTime()), isPM(localTime())?'P':'A');
 #endif
+  } else {
+    snprintf(buf, sizeof(buf), P("        "));
+  }
   display.print(buf);
   
   if (paused) {
@@ -1922,5 +2014,4 @@ void loop() {
   }
   
 }
-
 
