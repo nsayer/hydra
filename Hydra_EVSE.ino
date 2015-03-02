@@ -384,7 +384,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.2 (EVSE)"
+#define VERSION "2.2.1 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -1010,6 +1010,7 @@ static void gfiSelfTest() {
       display.print(P("Stuck set"));
       while(true); // and goodnight
     }
+  delay(GFI_TEST_CLEAR_TIME);
   gfiTriggered = false;
 }
 
