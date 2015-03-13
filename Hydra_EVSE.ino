@@ -384,7 +384,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.2.1 (EVSE)"
+#define VERSION "2.2.2 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -595,18 +595,21 @@ void setRelay(unsigned int car, unsigned int state) {
     // We're transitioning from no car to one car - insert a GFI self test.
     gfiSelfTest();
   }
-  relay_change_time = millis();
   log(LOG_DEBUG, P("Setting %s relay to %s"), car_str(car), logic_str(state));
   switch(car) {
   case CAR_A:
+    if (relay_state_a == state) return; // did nothing.
     digitalWrite(CAR_A_RELAY, state);
     relay_state_a = state;
     break;
   case CAR_B:
+    if (relay_state_b == state) return; // did nothing.
     digitalWrite(CAR_B_RELAY, state);
     relay_state_b = state;
     break;
   }
+  // This only counts if we actually changed anything.
+  relay_change_time = millis();
 }
 
 // If it's in an error state, it's not charging (the relay may still be on during error delay).
@@ -1644,6 +1647,8 @@ void loop() {
         error(BOTH, 'F');
       }
     }
+  } else {
+    current_ground_status = 2; // Force the check to take place
   }
 #endif
 
