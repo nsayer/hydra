@@ -27,6 +27,17 @@ This will be the mechanism for determining state change requests from each car. 
 pins will be connected to current transformers to act as ammeters for each car. The last two analog pins
 are taken by the i2c system, which will communicate with an LCD shield (via the LiquidTWI2 library).
 
+There are two hardware variants - the "Splitter" and the "EVSE". The splitter is intended to be powered via a J1772
+inlet. The inlet's pilot and proximity lines are fed to the controller so that it can determine the amount of current
+available to share with the two vehicles. The EVSE variant trades the inlet monitoring hardware for a GFI
+and a real-time clock chip. The EVSE firmware has a menu system that can be used to set various operating parameters -
+most important of which is the amount of current available. It is important that this be set no higher than 80% of the
+rating of the incoming circuit wiring and circuit breaker!
+
+Both hardware variants share a common HV board that provides the logic board with the results of the ground impedance test
+as well as the "stuck relay" test for both contactors. The HV board also has contactor switching triacs for each car and a
+12VDC power supply for the entire system. The HV board and logic boards are connected with a 10 pin FFC.
+
 SOFTWARE SPECIFICATION
 ----------------------
 
@@ -68,10 +79,8 @@ from an EVSE as well. Doing that requires either a dedicated piece of hardware o
 
 ATMega chips are pretty cheap and programming one to do the job of reporting the frequency and duty cycle of a
 J1772 pilot signal is pretty simple. The schematic, Eagle BRD and DigiKey BOM files for my homebrew EV simulator
-are available for download from the link below, and boards can be had from OSHPark. You can either power the
-board with a 5V wall wart and use the OpenEVSE LCD backpack to display the frequency, duty cycle, and amp
-rating or you can connect up a 5V FTDI cable to the board (which will also power the circuit) and watch the
-results get printed out.
+are available for download from the link below, and boards can be had from OSHPark. The board is available as a
+backpack for an 80x36mm 2x16 character LCD module driven by an ATTiny84.
 
 HARDWARE
 --------
