@@ -38,6 +38,22 @@
 // If, for some reason, your wiring layout differs, then...
 // #define SWAP_CARS 1
 
+// If your Hydra lacks the ground test functionality, comment this out
+#define GROUND_TEST
+
+// If your Hydra lacks the Relay test functionality, comment this out
+#define RELAY_TEST
+
+// After the relay changes state, don't bomb on relay errors for this long.
+#define RELAY_TEST_GRACE_TIME 500
+
+#ifdef GROUND_TEST
+
+// This must be high at all times while charging either car, or else it's a ground failure.
+#define GROUND_TEST_PIN 6
+
+#endif
+
 // ---------- DIGITAL PINS ----------
 #define INCOMING_PILOT_PIN      2
 #define INCOMING_PILOT_INT      0
@@ -54,11 +70,22 @@
 #define CAR_A_RELAY             8
 #define CAR_B_RELAY             7
 
+#ifdef RELAY_TEST
+#define CAR_A_RELAY_TEST        A3
+#define CAR_B_RELAY_TEST        A2
+#endif
+
 // ---------- ANALOG PINS ----------
 #define CAR_A_PILOT_SENSE_PIN   1
 #define CAR_B_PILOT_SENSE_PIN   0
+#ifdef RELAY_TEST
+// When the relay test functionality was added, the current read pins moved.
+#define CAR_A_CURRENT_PIN       7
+#define CAR_B_CURRENT_PIN       6
+#else
 #define CAR_A_CURRENT_PIN       3
 #define CAR_B_CURRENT_PIN       2
+#endif
 #else
 #define CAR_A_PILOT_OUT_PIN     9
 #define CAR_B_PILOT_OUT_PIN     10
@@ -66,11 +93,21 @@
 #define CAR_A_RELAY             7
 #define CAR_B_RELAY             8
 
+#ifdef RELAY_TEST
+#define CAR_A_RELAY_TEST        A2
+#define CAR_B_RELAY_TEST        A3
+#endif
+
 // ---------- ANALOG PINS ----------
 #define CAR_A_PILOT_SENSE_PIN   0
 #define CAR_B_PILOT_SENSE_PIN   1
+#ifdef RELAY_TEST
+#define CAR_A_CURRENT_PIN       6
+#define CAR_B_CURRENT_PIN       7
+#else
 #define CAR_A_CURRENT_PIN       2
 #define CAR_B_CURRENT_PIN       3
+#endif
 #endif
 
 #if 0
@@ -201,6 +238,9 @@
 
 // Each count of the A/d converter is 4.882 mV (5/1024). V/A divided by V/unit is unit/A. For the reference
 // design, that's 9.46. But we want milliamps per unit, so divide that into 1000. Round up to get...
+// RB = 56: Original reference design
+//#define CURRENT_SCALE_FACTOR 89
+// RB = 47: Current reference design
 #define CURRENT_SCALE_FACTOR 106
 
 #define LOG_NONE 0
@@ -255,7 +295,7 @@
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "1.1.2"
+#define VERSION "2.2 (Splitter)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -268,11 +308,15 @@ unsigned long car_a_request_time, car_b_request_time;
 unsigned long car_a_error_time, car_b_error_time;
 unsigned long last_current_log_car_a, last_current_log_car_b;
 unsigned long last_state_log;
+unsigned long relay_change_time;
 unsigned long sequential_pilot_timeout;
 unsigned int relay_state_a, relay_state_b, pilot_state_a, pilot_state_b;
 unsigned int lastProximity, operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
 boolean paused = false;
+#ifdef GROUND_TEST
+unsigned char current_ground_status;
+#endif
 
 void log(unsigned int level, const char * fmt_str, ...) {
 #if SERIAL_LOG_LEVEL > 0
@@ -458,14 +502,17 @@ void setRelay(unsigned int car, unsigned int state) {
   log(LOG_DEBUG, P("Setting %s relay to %s"), car_str(car), logic_str(state));
   switch(car) {
   case CAR_A:
+    if (relay_state_a == state) return; // Nothing changed
     digitalWrite(CAR_A_RELAY, state);
     relay_state_a = state;
     break;
   case CAR_B:
+    if (relay_state_b == state) return; // Nothing changed
     digitalWrite(CAR_B_RELAY, state);
     relay_state_b = state;
     break;
   }
+  relay_change_time = millis();
 }
 
 // If it's in an error state, it's not charging (the relay may still be on during error delay).
@@ -886,6 +933,13 @@ void setup() {
   pinMode(CAR_B_PILOT_OUT_PIN, OUTPUT);
   pinMode(CAR_A_RELAY, OUTPUT);
   pinMode(CAR_B_RELAY, OUTPUT);
+#ifdef GROUND_TEST
+  pinMode(GROUND_TEST_PIN, INPUT);
+#endif
+#ifdef RELAY_TEST
+  pinMode(CAR_A_RELAY_TEST, INPUT);
+  pinMode(CAR_B_RELAY_TEST, INPUT);
+#endif
 
   digitalWrite(OUTGOING_PROXIMITY_PIN, LOW);
 
@@ -910,7 +964,10 @@ void setup() {
   button_debounce_time = 0;
   button_press_time = 0;
   sequential_pilot_timeout = 0;
-  
+  relay_change_time = 0;
+#ifdef GROUND_TEST
+  current_ground_status = 0;
+#endif
   operatingMode = EEPROM.read(EEPROM_LOC_MODE);
   if (operatingMode > LAST_MODE) {
     operatingMode = DEFAULT_MODE;
@@ -942,6 +999,21 @@ void setup() {
   // In principle, neither of the above two !success conditions should ever
   // happen.
 
+#ifdef RELAY_TEST
+  {
+    boolean test_a = digitalRead(CAR_A_RELAY_TEST) == HIGH;
+    boolean test_b = digitalRead(CAR_B_RELAY_TEST) == HIGH;
+    if (test_a || test_b) {
+      display.setBacklight(RED);
+      display.clear();
+      display.print(P("Relay Test Failure: "));
+      if (test_a) display.print('A');
+      if (test_b) display.print('B');
+      while(true); // and goodnight
+    }
+  }
+#endif
+
   // meanwhile, the fill in the incoming pilot rolling average...
   for(int i = 0; i < ROLLING_AVERAGE_SIZE; i++) {
     pollIncomingPilot();
@@ -955,6 +1027,38 @@ void setup() {
 }
 
 void loop() {
+
+#ifdef GROUND_TEST
+  if ((relay_state_a == HIGH || relay_state_b == HIGH) && relay_change_time == 0) {
+    unsigned char ground = digitalRead(GROUND_TEST_PIN) == HIGH;
+    if (ground != current_ground_status) {
+      current_ground_status = ground;
+      if (!ground) {
+        // we've just noticed a ground failure.
+        log(LOG_INFO, P("Ground failure detected"));
+        error(BOTH, 'F');
+      }
+    }
+  } else {
+    current_ground_status = 2; // Force the check to take place
+  }
+#endif
+
+#ifdef RELAY_TEST
+  if (relay_change_time == 0) {
+    // The relay test outputs should match the relay pin state (modulo change delay).
+    if ((digitalRead(CAR_A_RELAY_TEST) == HIGH) != (relay_state_a == HIGH)) {
+      log(LOG_INFO, P("Relay fault detected on car A"));
+      error(CAR_A, 'R');    
+    }
+    if ((digitalRead(CAR_B_RELAY_TEST) == HIGH) != (relay_state_b == HIGH)) {
+      log(LOG_INFO, P("Relay fault detected on car B"));
+      error(CAR_B, 'R');
+    }
+  }
+#endif
+  if (millis() > relay_change_time + RELAY_TEST_GRACE_TIME)
+    relay_change_time = 0;
 
   // cut down on how frequently we call millis()
   boolean proximityOrPilotError = false;
@@ -1187,7 +1291,7 @@ void loop() {
     if (now - last_state_log > STATE_LOG_INTERVAL) {
       last_state_log = now;
       log(LOG_INFO, P("States: Car A, %s; Car B, %s"), state_str(last_car_a_state), state_str(last_car_b_state));
-      log(LOG_INFO, P("Incoming pilot %lu mA"), incomingPilotMilliamps);
+      log(LOG_INFO, P("Incoming pilot %s"), formatMilliamps(incomingPilotMilliamps));
     }
   }
    
@@ -1342,5 +1446,6 @@ void loop() {
   }
   
 }
+
 
 
