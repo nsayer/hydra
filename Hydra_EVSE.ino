@@ -137,7 +137,8 @@
 
 #define GFI_TEST_CYCLES 50 // 50 cycles
 #define GFI_PULSE_DURATION_MS 8000 // of roughly 60 Hz. - 8 ms as a half-cycle
-#define GFI_TEST_CLEAR_TIME 250 // Takes the GFCI this long to clear
+#define GFI_TEST_CLEAR_TIME 500 // Takes the GFCI this long to clear
+#define GFI_TEST_DEBOUNCE_TIME 100 // Delay extra time after GFCI clears to make sure it stays.
 
 // These are the expected analogRead() ranges for pilot read-back from the cars.
 // These are calculated from the expected voltages seen through the dividor network,
@@ -986,6 +987,19 @@ unsigned int checkEvent() {
   }
 }
 
+static void gfiTestFailure(unsigned char state) {
+  display.setBacklight(RED);
+  display.clear();
+  display.print(P("GFI Test Failure"));
+  display.setCursor(0, 1);
+  display.print(P("Stuck "));
+  if (state)
+    display.print(P("set"));
+  else
+    display.print(P("clear"));
+  while(true); // and goodnight
+}
+
 static void gfiSelfTest() {
   gfiTriggered = false;
   for(int i = 0; i < GFI_TEST_CYCLES; i++) {
@@ -995,25 +1009,11 @@ static void gfiSelfTest() {
     delayMicroseconds(GFI_PULSE_DURATION_MS);
     if (gfiTriggered) break; // no need to keep trying.
   }
-  if (!gfiTriggered) {
-    display.setBacklight(RED);
-    display.clear();
-    display.print(P("GFI Test Failure"));
-    display.setCursor(0, 1);
-    display.print(P("Stuck clear"));
-    while(true); // and goodnight
-  }
+  if (!gfiTriggered) gfiTestFailure(0);
   unsigned long clearStart = millis();
   while(digitalRead(GFI_PIN) == HIGH) 
-    if (millis() > clearStart + GFI_TEST_CLEAR_TIME) {
-      display.setBacklight(RED);
-      display.clear();
-      display.print(P("GFI Test Failure"));
-      display.setCursor(0, 1);
-      display.print(P("Stuck set"));
-      while(true); // and goodnight
-    }
-  delay(GFI_TEST_CLEAR_TIME);
+    if (millis() > clearStart + GFI_TEST_CLEAR_TIME) gfiTestFailure(1);
+  delay(GFI_TEST_DEBOUNCE_TIME);
   gfiTriggered = false;
 }
 
