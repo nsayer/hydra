@@ -385,7 +385,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.2.2 (EVSE)"
+#define VERSION "2.2.3 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
