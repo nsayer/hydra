@@ -867,10 +867,10 @@ void sequential_mode_transition(unsigned int us, unsigned int car_state) {
       }
       // We're not both in state B anymore
       sequential_pilot_timeout = 0;
-      setRelay(us, HIGH); // turn on the juice
       display.setCursor((us == CAR_A)?0:8, 1);
       display.print((us == CAR_A)?"A":"B");
       display.print(P(": ON   "));
+      setRelay(us, HIGH); // turn on the juice
       break;
     case STATE_E:
       error(us, 'E');
@@ -923,11 +923,11 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         if (pilotState(them) == FULL)
           setPilot(them, HALF);
         setPilot(us, FULL); // this is redundant unless we are going directly from A to C.
-        setRelay(us, HIGH);
         *car_request_time = 0;
         display.setCursor((us == CAR_A)?0:8, 1);
         display.print((us == CAR_A)?"A":"B");
         display.print(P(": ON   "));
+        setRelay(us, HIGH);
       }
       break;
     case STATE_E:
@@ -1955,9 +1955,9 @@ void loop() {
     // We've waited long enough.
     log(LOG_INFO, P("Delayed transition completed on car A"));
     car_a_request_time = 0;
-    setRelay(CAR_A, HIGH);
     display.setCursor(0, 1);
     display.print(P("A: ON   "));
+    setRelay(CAR_A, HIGH);
   }
   if (car_a_error_time != 0 && (millis() - car_a_error_time) > ERROR_DELAY) {
     car_a_error_time = 0;
@@ -1976,9 +1976,9 @@ void loop() {
     log(LOG_INFO, P("Delayed transition completed on car B"));
     // We've waited long enough.
     car_b_request_time = 0;
-    setRelay(CAR_B, HIGH);
     display.setCursor(8, 1);
     display.print(P("B: ON   "));
+    setRelay(CAR_B, HIGH);
   }
   if (car_b_error_time != 0 && (millis() - car_b_error_time) > ERROR_DELAY) {
     car_b_error_time = 0;
