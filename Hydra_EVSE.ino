@@ -398,13 +398,14 @@ unsigned long car_a_error_time, car_b_error_time;
 unsigned long last_current_log_car_a, last_current_log_car_b;
 unsigned long last_state_log;
 unsigned long sequential_pilot_timeout;
-unsigned int relay_state_a, relay_state_b, pilot_state_a, pilot_state_b;
+volatile unsigned int relay_state_a, relay_state_b;
+unsigned int pilot_state_a, pilot_state_b;
 unsigned int operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
 #ifdef GROUND_TEST
 unsigned char current_ground_status;
 #endif
-unsigned long relay_change_time;
+volatile unsigned long relay_change_time;
 boolean paused = false;
 boolean enterPause = false;
 boolean inMenu = false;
@@ -584,9 +585,11 @@ void error(unsigned int car, char err) {
 
 void gfi_trigger() {
   // Make sure both relays are *immediately* flipped off.
-  // Do this without trying to be fancy about state.
   digitalWrite(CAR_A_RELAY, LOW);
   digitalWrite(CAR_B_RELAY, LOW);
+  // Now make the data consistent. Make sure that anything you touch here is declared "volatile"
+  relay_state_a = relay_state_b = LOW;
+  relay_change_time = millis();
   // We don't have time in an IRQ to do more than that.
   gfiTriggered = true;
 }
