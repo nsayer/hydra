@@ -47,10 +47,24 @@
 // If your Hydra lacks the Relay test functionality, comment this out
 #define RELAY_TEST
 
+// Some vehicles will turn the contactors on and off repeatedly during
+// some operations. If the other vehicle is charging, that will slow things
+// down as the other car's pilot must be raised and lowered, with the attendant
+// delay. Turning this on imposes a delay between raising the remaining car's
+// pilot. If the other car changes its mind, it can get power without a delay.
+//#define QUICK_CYCLING_WORKAROUND
+
 #ifdef GROUND_TEST
 
 // This must be high at all times while charging either car, or else it's a ground failure.
 #define GROUND_TEST_PIN 6
+
+#endif
+
+#ifdef QUICK_CYCLING_WORKAROUND
+
+// How many minutes do we wait after one car finishes before raising the other pilot?
+#define PILOT_RAISING_HOLDOFF_MINUTES 5
 
 #endif
 
@@ -137,8 +151,8 @@
 
 #define GFI_TEST_CYCLES 50 // 50 cycles
 #define GFI_PULSE_DURATION_MS 8000 // of roughly 60 Hz. - 8 ms as a half-cycle
-#define GFI_TEST_CLEAR_TIME 500 // Takes the GFCI this long to clear
-#define GFI_TEST_DEBOUNCE_TIME 100 // Delay extra time after GFCI clears to make sure it stays.
+#define GFI_TEST_CLEAR_TIME 1000 // Takes the GFCI this long to clear
+#define GFI_TEST_DEBOUNCE_TIME 500 // Delay extra time after GFCI clears to make sure it stays.
 
 // These are the expected analogRead() ranges for pilot read-back from the cars.
 // These are calculated from the expected voltages seen through the dividor network,
@@ -404,6 +418,9 @@ unsigned int operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
 #ifdef GROUND_TEST
 unsigned char current_ground_status;
+#endif
+#ifdef QUICK_CYCLING_WORKAROUND
+unsigned long pilot_release_holdoff_time;
 #endif
 volatile unsigned long relay_change_time;
 boolean paused = false;
@@ -903,8 +920,14 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
       display.print((us == CAR_A)?"A":"B");
       display.print(car_state == STATE_A ? ": ---  " : ": off  ");
       *car_request_time = 0;
-      if (pilotState(them) == HALF)
+      if (pilotState(them) == HALF) {
+#ifdef PILOT_CYCLING_WORKAROUND
+        // In *this* much time, we'll give the other car a full pilot.
+        pilot_release_holdoff_time = millis() + PILOT_RELEASE_HOLDOFF_MINUTES * (1000 * 60);
+#else
         setPilot(them, FULL);
+#endif
+      }
       break;
     case STATE_C:
     case STATE_D:
@@ -913,6 +936,19 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         break;
       }
       if (isCarCharging(them)) {
+#ifdef PILOT_CYCLING_WORKAROUND
+        if (pilot_release_holdoff_time != 0) {
+          // We turned back on before the grace period. We can just go, since they
+          // still have a half-pilot.
+          pilot_release_holdoff_time = 0; // cancel the grace period
+          setPilot(them, HALF); // *should* be redundant
+          setPilot(us, HALF); // redundant, unless we went straight from A to C.
+          display.setCursor((us == CAR_A)?0:8, 1);
+          display.print((us == CAR_A)?"A":"B");
+          display.print(P(": ON   "));
+          setRelay(us, HIGH);
+        } else {
+#endif
         // if they are charging, we must transition them.
         *car_request_time = millis();
         // Drop car A down to 50%
@@ -921,6 +957,9 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         display.setCursor((us == CAR_A)?0:8, 1);
         display.print((us == CAR_A)?"A":"B");
         display.print(P(": wait "));
+#ifdef PILOT_CYCLING_WORKAROUND
+        }
+#endif
       } else {
         // if they're not charging, then we can just go. If they have a full pilot, they get downshifted.
         if (pilotState(them) == FULL)
@@ -1534,6 +1573,9 @@ void setup() {
   sequential_pilot_timeout = 0;
   last_minute = 99;
   relay_change_time = 0;
+#ifdef QUICK_CYCLING_WORKAROUND
+  pilot_release_holdoff_time = 0;
+#endif
 
   operatingMode = EEPROM.read(EEPROM_LOC_MODE);
   if (operatingMode > LAST_MODE) {
@@ -1951,7 +1993,7 @@ void loop() {
     car_b_overdraw_begin = 0;
     memset(car_b_current_samples, 0, sizeof(car_b_current_samples));
   }
-
+  
   // We need to use labs() here because we cached now early on, so it may actually be
   // *before* the time in question
   if (car_a_request_time != 0 && (millis() - car_a_request_time) > TRANSITION_DELAY) {
@@ -1995,6 +2037,20 @@ void loop() {
     if (isCarCharging(CAR_A) || last_car_a_state == STATE_B)
         setPilot(CAR_A, FULL);
   }
+  
+#ifdef QUICK_CYCLING_WORKAROUND
+  if (pilot_release_holdoff_time != 0 && millis() > pilot_release_holdoff_time) {
+    log(LOG_INFO, P("Pilot release interval elapsed. Raising pilot to full on remaining car."));
+      if (isCarCharging(CAR_A)) {
+        setPilot(CAR_A, FULL);
+      } else if (isCarCharging(CAR_B)) {
+        setPilot(CAR_B, FULL);
+      } else {
+        log(LOG_INFO, P("Pilot release interval elapsed, but no car is charging??"));
+      }
+      pilot_release_holdoff_time = 0;
+  }
+#endif
   
   unsigned int event = checkEvent();
   if (event == EVENT_SHORT_PUSH)
