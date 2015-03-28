@@ -64,7 +64,7 @@
 #ifdef QUICK_CYCLING_WORKAROUND
 
 // How many minutes do we wait after one car finishes before raising the other pilot?
-#define PILOT_RAISING_HOLDOFF_MINUTES 5
+#define PILOT_RELEASE_HOLDOFF_MINUTES 5
 
 #endif
 
@@ -399,7 +399,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.2.3 (EVSE)"
+#define VERSION "2.2.4 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -920,10 +920,19 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
       display.print((us == CAR_A)?"A":"B");
       display.print(car_state == STATE_A ? ": ---  " : ": off  ");
       *car_request_time = 0;
+#ifdef QUICK_CYCLING_WORKAROUND
+      if (!isCarCharging(them)) {
+        // If the other car isn't actually charging, then we don't
+        // need to bother being tricky.
+        if (pilotState(them) == HALF)
+          setPilot(them, FULL);
+        pilot_release_holdoff_time = 0;
+      } else
+#endif
       if (pilotState(them) == HALF) {
-#ifdef PILOT_CYCLING_WORKAROUND
-        // In *this* much time, we'll give the other car a full pilot.
-        pilot_release_holdoff_time = millis() + PILOT_RELEASE_HOLDOFF_MINUTES * (1000 * 60);
+#ifdef QUICK_CYCLING_WORKAROUND
+        // Since they're charging, in *this* much time, we'll give the other car a full pilot.
+        pilot_release_holdoff_time = millis() + (PILOT_RELEASE_HOLDOFF_MINUTES * (1000L * 60));
 #else
         setPilot(them, FULL);
 #endif
@@ -936,7 +945,7 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         break;
       }
       if (isCarCharging(them)) {
-#ifdef PILOT_CYCLING_WORKAROUND
+#ifdef QUICK_CYCLING_WORKAROUND
         if (pilot_release_holdoff_time != 0) {
           // We turned back on before the grace period. We can just go, since they
           // still have a half-pilot.
@@ -957,7 +966,7 @@ void shared_mode_transition(unsigned int us, unsigned int car_state) {
         display.setCursor((us == CAR_A)?0:8, 1);
         display.print((us == CAR_A)?"A":"B");
         display.print(P(": wait "));
-#ifdef PILOT_CYCLING_WORKAROUND
+#ifdef QUICK_CYCLING_WORKAROUND
         }
 #endif
       } else {
