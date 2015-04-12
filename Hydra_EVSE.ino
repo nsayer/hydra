@@ -151,8 +151,8 @@
 
 #define GFI_TEST_CYCLES 50 // 50 cycles
 #define GFI_PULSE_DURATION_MS 8000 // of roughly 60 Hz. - 8 ms as a half-cycle
-#define GFI_TEST_CLEAR_TIME 1000 // Takes the GFCI this long to clear
-#define GFI_TEST_DEBOUNCE_TIME 500 // Delay extra time after GFCI clears to make sure it stays.
+#define GFI_TEST_CLEAR_TIME 100 // Takes the GFCI this long to clear
+#define GFI_TEST_DEBOUNCE_TIME 50 // Delay extra time after GFCI clears to make sure it stays.
 
 // These are the expected analogRead() ranges for pilot read-back from the cars.
 // These are calculated from the expected voltages seen through the dividor network,
