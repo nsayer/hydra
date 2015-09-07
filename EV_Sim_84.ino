@@ -30,17 +30,52 @@
 #define LCD_RS 3
 #define LCD_E 1
 
-#define PILOT_DIGITAL_SAMPLING_PIN  0
+// Hardware versions prior to 4.0 use DIGITAL_SAMPLING. 4.0 and beyond use
+// analog.
+//
+// You are allowed to define both. If you do, then digital sampling is used
+// to obtain the duty cycle, while analog sampling is used for the high/low
+// voltage measurement. It turns out, however, that both are interleaved,
+// so the speed advantage of digital sampling is lost.
+//
+// A workaround for that would be to replace analogRead() with manual ADC control,
+// and performing the digital sampling while waiting for the ADC to complete.
+//
+// It turns out, however, that analog sampling is good enough for our purposes.
+//#define DIGITAL_SAMPLING
+#define ANALOG_SAMPLING
 
+#if !defined(DIGITAL_SAMPLING) && !defined(ANALOG_SAMPLING)
+#error Well, you have to let me do it SOMEHOW...
+#endif
+
+#ifdef DIGITAL_SAMPLING
+#define PILOT_DIGITAL_SAMPLING_PIN  0
+#else
+// Since we're not going to use digital sampling,
+// we have to decide what constitutes a high and
+// what constitutes a low for the purposes of the
+// square wave sampling. This happens to be the 0 volt
+// level.
+#define ANALOG_STATE_TRANSITION_LEVEL 556
+#endif
+
+#ifdef ANALOG_SAMPLING
 #define PILOT_ANALOG_SAMPLING_PIN 2
+#endif
 
 #define BUTTON_PIN 8
 
-#define SAMPLE_PERIOD 350
+#define SAMPLE_PERIOD 500
 
+#ifdef ANALOG_SAMPLING
 // The button selects from different available display modes.
 // At the moment, there are two: J1772 ampacity and min/max voltage
 #define MODE_COUNT 2
+#else
+// There's no analog display mode without analog sampling
+#define MODE_COUNT 1
+#endif
 
 // The different types of button events.
 #define BUTTON_NONE 0
@@ -56,8 +91,10 @@
 // A circuit simulation shows the readback voltage as 4.543 at 12 volts in and 891 mV at -12 volts.
 // Since a single A/D unit represents 4.88 mV, we can work out a formula to convert A/D readings
 // into millivolts of the actual pilot signal
+#ifdef ANALOG_SAMPLING
 #define PILOT_READ_SCALE 32
 #define PILOT_READ_OFFSET (-556)
+#endif
 
 #include <LiquidCrystal.h>
 
@@ -131,16 +168,21 @@ static inline char read_button() {
   }
 }
 
+#ifdef ANALOG_SAMPLING
 static inline int scale_mv(unsigned int value) {
   return (((int)value) + PILOT_READ_OFFSET) * PILOT_READ_SCALE;
 }
+#endif
 
 void setup() {
-  
+#ifdef DIGITAL_SAMPLING
   pinMode(PILOT_DIGITAL_SAMPLING_PIN, INPUT_PULLUP);
+#endif
   pinMode(BUTTON_PIN, INPUT_PULLUP);
+#ifdef ANALOG_SAMPLING
   pinMode(PILOT_ANALOG_SAMPLING_PIN, INPUT);
   analogReference(DEFAULT);
+#endif
     
   display.begin(16, 2);
   
@@ -157,8 +199,10 @@ void loop() {
   static unsigned char mode = 0;
   unsigned int last_state = 99; // neither HIGH nor LOW
   unsigned long high_count = 0, low_count = 0, state_changes = -1; // ignore the first change from "invalid"
+#ifdef ANALOG_SAMPLING
   unsigned int high_analog=0, low_analog=0xffff;
-  
+#endif
+
   for(unsigned long start_poll = millis(); millis() - start_poll < SAMPLE_PERIOD; ) {
     switch(read_button()) {
       case BUTTON_NONE:
@@ -168,10 +212,21 @@ void loop() {
         if (++mode >= MODE_COUNT) mode = 0;
         break;
     }
-    
-    unsigned int state = digitalRead(PILOT_DIGITAL_SAMPLING_PIN);
-    
-    if (state == LOW)
+
+#ifdef ANALOG_SAMPLING    
+    unsigned int analog = analogRead(PILOT_ANALOG_SAMPLING_PIN);
+    if (analog > high_analog) high_analog = analog;
+    if (analog < low_analog) low_analog = analog;
+#endif
+
+    unsigned int state;
+#ifdef DIGITAL_SAMPLING    
+    state = digitalRead(PILOT_DIGITAL_SAMPLING_PIN);
+#else
+    state = (analog < ANALOG_STATE_TRANSITION_LEVEL)?LOW:HIGH;
+#endif
+
+    if (state == LOW)    
       low_count++;
     else
       high_count++;
@@ -181,9 +236,6 @@ void loop() {
       last_state = state;
     }
 
-    unsigned int analog = analogRead(PILOT_ANALOG_SAMPLING_PIN);
-    if (analog > high_analog) high_analog = analog;
-    if (analog < low_analog) low_analog = analog;
   }
   
   char buf[32];
@@ -211,11 +263,13 @@ void loop() {
         sprintf(buf, P("%2ld.%02ld A         "), amps / 1000, (amps % 1000) / 10);
       }
       break;
+#ifdef ANALOG_SAMPLING
     case 1:
       int low_mv = scale_mv(low_analog);
       int high_mv = scale_mv(high_analog);
       sprintf(buf,P(" %+03d.%01d  %+03d.%01d"), low_mv/1000, abs(low_mv % 1000) / 100, high_mv/1000, abs(high_mv % 1000) / 100);
       break;
+#endif
   }
   
   display.setCursor(0, 1);
