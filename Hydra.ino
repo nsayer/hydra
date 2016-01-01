@@ -18,6 +18,7 @@
  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include <avr/wdt.h>
 #include <Wire.h>
 #include <LiquidTWI2.h>
 #include <PWM.h>
@@ -39,10 +40,21 @@
 // #define SWAP_CARS 1
 
 // If your Hydra lacks the ground test functionality, comment this out
-#define GROUND_TEST
+//#define GROUND_TEST
 
 // If your Hydra lacks the Relay test functionality, comment this out
+//#define RELAY_TEST
+
+// If the relay test is a combined relay test and GCM, then uncomment
+// this.
+//#define RELAY_TESTS_GROUND
+
+#ifdef RELAY_TESTS_GROUND
+// This implies RELAY_TEST
 #define RELAY_TEST
+// ... and implies an alternative to GROUND_TEST
+#undef GROUND_TEST
+#endif
 
 // After the relay changes state, don't bomb on relay errors for this long.
 #define RELAY_TEST_GRACE_TIME 500
@@ -295,7 +307,7 @@
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.2 (Splitter)"
+#define VERSION "2.3 (Splitter)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -344,6 +356,30 @@ void log(unsigned int level, const char * fmt_str, ...) {
   }
   Serial.println(buf);
 #endif
+}
+
+// Delay, but pet the watchdog while doing it.
+static void Delay(unsigned long ms) {
+  while(ms > 100) {
+    delay(100);
+    wdt_reset();
+    ms -= 100;
+  }
+  delay(ms);
+  wdt_reset();
+}
+
+static void die() {
+  // set both pilots to -12
+  setPilot(CAR_A, LOW);
+  setPilot(CAR_B, LOW);
+  // make sure both relays are off
+  setRelay(CAR_A, LOW);
+  setRelay(CAR_B, LOW);
+  // and goodnight
+  do {
+    wdt_reset(); // keep petting the dog, but do nothing else.
+  } while(1);
 }
 
 static inline const char *car_str(unsigned int car) {
@@ -916,6 +952,10 @@ unsigned int checkEvent() {
 }
 
 void setup() {
+  // This must be done as early as possible to prevent the watchdog from biting during reset.
+  MCUSR = 0;
+  wdt_enable(WDTO_1S);
+
   InitTimersSafe();
   display.setMCPType(LTI_TYPE_MCP23017);
   display.begin(16, 2); 
@@ -1009,7 +1049,7 @@ void setup() {
       display.print(P("Relay Test Failure: "));
       if (test_a) display.print('A');
       if (test_b) display.print('B');
-      while(true); // and goodnight
+      die(); // and goodnight
     }
   }
 #endif
@@ -1022,12 +1062,15 @@ void setup() {
 
   // Display the splash screen for 2 seconds total. We spent some time above sampling the
   // pilot, so don't include that.
-  delay(2000 - (ROLLING_AVERAGE_SIZE * PILOT_POLL_INTERVAL)); // let the splash screen show
+  Delay(2000 - (ROLLING_AVERAGE_SIZE * PILOT_POLL_INTERVAL)); // let the splash screen show
   display.clear();
 }
 
 void loop() {
 
+  // Pet the dog
+  wdt_reset();
+  
 #ifdef GROUND_TEST
   if ((relay_state_a == HIGH || relay_state_b == HIGH) && relay_change_time == 0) {
     unsigned char ground = digitalRead(GROUND_TEST_PIN) == HIGH;
@@ -1046,15 +1089,26 @@ void loop() {
 
 #ifdef RELAY_TEST
   if (relay_change_time == 0) {
-    // The relay test outputs should match the relay pin state (modulo change delay).
-    if ((digitalRead(CAR_A_RELAY_TEST) == HIGH) != (relay_state_a == HIGH)) {
+    // The relay is off, but the relay test shows a voltage, that's a stuck relay
+    if ((digitalRead(CAR_A_RELAY_TEST) == HIGH) && (relay_state_a == LOW)) {
       log(LOG_INFO, P("Relay fault detected on car A"));
       error(CAR_A, 'R');    
     }
-    if ((digitalRead(CAR_B_RELAY_TEST) == HIGH) != (relay_state_b == HIGH)) {
+    if ((digitalRead(CAR_B_RELAY_TEST) == HIGH) && (relay_state_b == LOW)) {
       log(LOG_INFO, P("Relay fault detected on car B"));
       error(CAR_B, 'R');
     }
+#ifdef RELAY_TESTS_GROUND
+    // If the relay is on, but the relay test does not show a voltage, that's a ground impedance failure
+    if ((digitalRead(CAR_A_RELAY_TEST) == LOW) && (relay_state_a == HIGH)) {
+      log(LOG_INFO, P("Ground failure detected on car A"));
+      error(CAR_A, 'F');    
+    }
+    if ((digitalRead(CAR_B_RELAY_TEST) == LOW) && (relay_state_b == HIGH)) {
+      log(LOG_INFO, P("Ground failure detected on car B"));
+      error(CAR_B, 'F);
+    }
+#endif
   }
 #endif
   if (millis() > relay_change_time + RELAY_TEST_GRACE_TIME)
