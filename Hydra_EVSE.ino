@@ -18,6 +18,7 @@
  51 Franklin Street, Fifth Floor, Boston, MA 02110-1301 USA.
  */
 
+#include <avr/wdt.h>
 #include <Wire.h>
 #include <LiquidTWI2.h>
 #include <PWM.h>
@@ -42,10 +43,20 @@
 // #define SWAP_CARS 1
 
 // If your Hydra lacks the ground test functionality, comment this out
-#define GROUND_TEST
+//#define GROUND_TEST
 
 // If your Hydra lacks the Relay test functionality, comment this out
+//#define RELAY_TEST
+
+// If your Hydra has a combined relay test / GCM system, then uncomment this
+#define RELAY_TESTS_GROUND
+
+#ifdef RELAY_TESTS_GROUND
+// This implies relay test
 #define RELAY_TEST
+// but implies an alternative to the ground test
+#undef GROUND_TEST
+#endif
 
 // Some vehicles will turn the contactors on and off repeatedly during
 // some operations. If the other vehicle is charging, that will slow things
@@ -324,6 +335,8 @@ event_type events[EVENT_COUNT];
 #define EEPROM_LOC_MAX_AMPS 2
 // The location in EEPROM of the selected timezone
 #define EEPROM_LOC_USE_DST 3
+// The location in EEPROM of the calibration value for the RTC chip
+#define EEPROM_LOC_CLOCK_CALIBRATION 4
 
 // Where do we start storing the events?
 #define EEPROM_EVENT_BASE 0x10
@@ -399,7 +412,7 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.2.4 (EVSE)"
+#define VERSION "2.3.1 (EVSE)"
 
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
@@ -412,7 +425,6 @@ unsigned long car_a_error_time, car_b_error_time;
 unsigned long last_current_log_car_a, last_current_log_car_b;
 unsigned long last_state_log;
 unsigned long sequential_pilot_timeout;
-volatile unsigned int relay_state_a, relay_state_b;
 unsigned int pilot_state_a, pilot_state_b;
 unsigned int operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
@@ -422,13 +434,15 @@ unsigned char current_ground_status;
 #ifdef QUICK_CYCLING_WORKAROUND
 unsigned long pilot_release_holdoff_time;
 #endif
+// These volatile ones are touched by the GFI interrupt handler
+volatile unsigned int relay_state_a, relay_state_b;
 volatile unsigned long relay_change_time;
+volatile boolean gfiTriggered = false;
 boolean paused = false;
 boolean enterPause = false;
 boolean inMenu = false;
 boolean inClockMenu = false;
 boolean inEventMenu = false;
-boolean gfiTriggered = false;
 unsigned int menu_number; // which menu are we presently in?
 unsigned int menu_item; // which item within the present menu is the currently displayed option?
 unsigned int menu_item_max; // for the current menu, what's the maximum item number?
@@ -572,14 +586,18 @@ void error(unsigned int car, char err) {
   sequential_pilot_timeout = 0;
   if (car == BOTH || car == CAR_A) {
     setPilot(CAR_A, HIGH);
-    last_car_a_state = STATE_E;
-    car_a_error_time = now;
+    if (last_car_a_state != STATE_E) {
+      last_car_a_state = STATE_E;
+      car_a_error_time = now;
+    }
     car_a_request_time = 0;
   }
   if (car == BOTH || car == CAR_B) {
     setPilot(CAR_B, HIGH);
-    last_car_b_state = STATE_E;
-    car_b_error_time = now;
+    if (last_car_b_state != STATE_E) {
+      last_car_b_state = STATE_E;
+      car_b_error_time = now;
+    }
     car_b_request_time = 0;
   }
   
@@ -1038,6 +1056,30 @@ unsigned int checkEvent() {
   }
 }
 
+// Just like delay(), but petting the watchdog while we're at it
+static void Delay(unsigned int t) {
+  while(t > 100) {
+    delay(100);
+    t -= 100;
+    wdt_reset();
+  }
+  delay(t);
+  wdt_reset();
+}
+
+static void die() {
+  // set both pilots to -12
+  setPilot(CAR_A, LOW);
+  setPilot(CAR_B, LOW);
+  // make sure both relays are off
+  setRelay(CAR_A, LOW);
+  setRelay(CAR_B, LOW);
+  // and goodnight
+  do {
+    wdt_reset(); // keep petting the dog, but do nothing else.
+  } while(1);
+}
+  
 static void gfiTestFailure(unsigned char state) {
   display.setBacklight(RED);
   display.clear();
@@ -1048,7 +1090,7 @@ static void gfiTestFailure(unsigned char state) {
     display.print(P("set"));
   else
     display.print(P("clear"));
-  while(true); // and goodnight
+  die();
 }
 
 static void gfiSelfTest() {
@@ -1059,12 +1101,15 @@ static void gfiSelfTest() {
     digitalWrite(GFI_TEST_PIN, LOW);
     delayMicroseconds(GFI_PULSE_DURATION_MS);
     if (gfiTriggered) break; // no need to keep trying.
+    wdt_reset();
   }
   if (!gfiTriggered) gfiTestFailure(0);
   unsigned long clearStart = millis();
-  while(digitalRead(GFI_PIN) == HIGH) 
+  while(digitalRead(GFI_PIN) == HIGH) {
+    wdt_reset();
     if (millis() > clearStart + GFI_TEST_CLEAR_TIME) gfiTestFailure(1);
-  delay(GFI_TEST_DEBOUNCE_TIME);
+  }
+  Delay(GFI_TEST_DEBOUNCE_TIME);
   gfiTriggered = false;
 }
 
@@ -1526,6 +1571,9 @@ void doMenu(boolean initialize) {
 
 void setup() {
 
+  MCUSR = 0; // changing the watchdog requires this first.
+  wdt_enable(WDTO_1S);
+
   // Start serial logging first so we can detect a good CPU reset.
 #if SERIAL_LOG_LEVEL > 0
   Serial.begin(SERIAL_BAUD_RATE);
@@ -1627,6 +1675,8 @@ void setup() {
   enable_dst = EEPROM.read(EEPROM_LOC_USE_DST) != 0;
   
   setSyncProvider(RTC.get);
+  char calValue = (char)EEPROM.read(EEPROM_LOC_CLOCK_CALIBRATION);
+  RTC.setCalibration(calValue);
 
   boolean success = SetPinFrequencySafe(CAR_A_PILOT_OUT_PIN, 1000);
   if (!success) {
@@ -1641,8 +1691,9 @@ void setup() {
   // In principle, neither of the above two !success conditions should ever
   // happen.
 
-  delay(2000); // let the splash screen show
+  Delay(2000);
   display.clear();
+
   gfiSelfTest();
   
 #if 0 // ground test is now only active while charging
@@ -1650,7 +1701,7 @@ void setup() {
     display.setBacklight(RED);
     display.clear();
     display.print(P("Ground Test Failure"));
-    while(true); // and goodnight
+    die();
   }
 #endif
 #ifdef RELAY_TEST
@@ -1660,16 +1711,19 @@ void setup() {
     if (test_a || test_b) {
       display.setBacklight(RED);
       display.clear();
-      display.print(P("Relay Test Failure: "));
+      display.print(P("Relay Failure: "));
+      display.setCursor(0, 1);
       if (test_a) display.print('A');
       if (test_b) display.print('B');
-      while(true); // and goodnight
+      die();
     }
   }
 #endif
 }
 
 void loop() {
+
+  wdt_reset();
 
   if (inMenu) {
     doMenu(false);
@@ -1708,15 +1762,26 @@ void loop() {
 
 #ifdef RELAY_TEST
   if (relay_change_time == 0) {
-    // The relay test outputs should match the relay pin state (modulo change delay).
-    if ((digitalRead(CAR_A_RELAY_TEST) == HIGH) != (relay_state_a == HIGH)) {
+    // If the power's off but there's still a voltage, that's a stuck relay
+    if ((digitalRead(CAR_A_RELAY_TEST) == HIGH) && (relay_state_a == LOW)) {
       log(LOG_INFO, P("Relay fault detected on car A"));
       error(CAR_A, 'R');    
     }
-    if ((digitalRead(CAR_B_RELAY_TEST) == HIGH) != (relay_state_b == HIGH)) {
+    if ((digitalRead(CAR_B_RELAY_TEST) == HIGH) && (relay_state_b == LOW)) {
       log(LOG_INFO, P("Relay fault detected on car B"));
       error(CAR_B, 'R');
     }
+#ifdef RELAY_TESTS_GROUND
+    // If the power's on, but there's no voltage, that's a ground impedance failure
+    if ((digitalRead(CAR_A_RELAY_TEST) == LOW) && (relay_state_a == HIGH)) {
+      log(LOG_INFO, P("Ground failure detected on car A"));
+      error(CAR_A, 'F');    
+    }
+    if ((digitalRead(CAR_B_RELAY_TEST) == LOW) && (relay_state_b == HIGH)) {
+      log(LOG_INFO, P("Ground failure detected on car B"));
+      error(CAR_B, 'F');
+    }
+#endif
   }
 #endif
   if (relay_change_time != 0 && millis() > relay_change_time + RELAY_TEST_GRACE_TIME)
@@ -2088,4 +2153,5 @@ void loop() {
   }
   
 }
+
 
