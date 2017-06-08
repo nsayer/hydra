@@ -30,7 +30,7 @@
 // HW version
 #define HW_VERSION "2.3.1"
 // SW version
-#define SW_VERSION "2.3.5"
+#define SW_VERSION "2.4.0"
 
 
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
@@ -334,10 +334,30 @@ typedef struct event_struct {
 
 event_type events[EVENT_COUNT];
 
+// Calibration menu items
+#define CALIB_AMM_MAX 5 // this is in 0.1A units
+#define CALIB_PILOT_MAX 10 // this is in -% units. Can derate pilots up to 5%.
+typedef struct calib_struct {
+  char amm_a, amm_b, pilot_a, pilot_b;
+
+  static unsigned char menuItem;
+
+  calib_struct() : amm_a(0), amm_b(0), pilot_a(0), pilot_b(0) {
+    eepromRead();
+  }
+
+  void eepromWrite();
+  void eepromRead();
+  void doMenu(boolean initialize);
+
+} calib_type;
+
+calib_type calib;
+static unsigned char calib_struct::menuItem;
+
+
 // The location in EEPROM to save the operating mode
 #define EEPROM_LOC_MODE 0
-// The location in EEPROM to save the (sequential mode) starting car
-//#define EEPROM_LOC_CAR 1
 
 // The location in EEPROM to save the maximum current (in amps)
 #define EEPROM_LOC_MAX_AMPS 2
@@ -348,6 +368,13 @@ event_type events[EVENT_COUNT];
 
 // Where do we start storing the events?
 #define EEPROM_EVENT_BASE 0x10
+
+// where do we store calibration data?
+#define EEPROM_CALIB (EEPROM_EVENT_BASE + EVENT_COUNT * sizeof(event_struct))
+
+// current tail in EEPROM
+#define EEPROM_END (EEPROM_CALIB + sizeof(calib_type))
+
 
 // menu 0: operating mode
 #define MENU_OPERATING_MODE 0
@@ -377,11 +404,17 @@ unsigned char currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40, 44, 5
 // menu 4: event alarms
 #define MENU_EVENT 4
 #define MENU_EVENT_HEADER "Config Events?"
-// menu 5: exit
-#define MENU_EXIT 5
+
+//menu 5: calibrations
+#define MENU_CALIB 5
+#define MENU_CALIB_HEADER "Calibration?"
+
+// menu 6: exit
+#define MENU_EXIT 6
 #define MENU_EXIT_HEADER "Exit Menus?"
+
 // end menus
-#define MAX_MENU_NUMBER 5
+#define MAX_MENU_NUMBER MENU_EXIT
 
 #define DAY_FLAGS "SMTWTFS"
 
@@ -448,8 +481,13 @@ volatile boolean gfiTriggered = false;
 boolean paused = false;
 boolean enterPause = false;
 boolean inMenu = false;
-boolean inClockMenu = false;
-boolean inEventMenu = false;
+
+// top level do-menu func forward declaration 
+void doMenu(boolean initialize);
+
+// current menu handler
+void (*doMenuFunc)(boolean) = doMenu;
+
 unsigned int menu_number; // which menu are we presently in?
 unsigned int menu_item; // which item within the present menu is the currently displayed option?
 unsigned int menu_item_max; // for the current menu, what's the maximum item number?
@@ -687,14 +725,17 @@ void setPilot(unsigned int car, unsigned int which) {
   log(LOG_DEBUG, P("Setting %s pilot to %s"), car_str(car), logic_str(which));
   // set the outgoing pilot for the given car to either HALF state, FULL state, or HIGH.
   int pin;
+  char pilot_derate;
   switch(car) {
     case CAR_A:
       pin = CAR_A_PILOT_OUT_PIN;
       pilot_state_a = which;
+      pilot_derate = calib.pilot_a;
       break;
     case CAR_B:
       pin = CAR_B_PILOT_OUT_PIN;
       pilot_state_b = which;
+      pilot_derate = calib.pilot_b;
       break;
     default: return;
   }
@@ -706,6 +747,13 @@ void setPilot(unsigned int car, unsigned int which) {
   else {
     unsigned long ma = incomingPilotMilliamps;
     if (which == HALF) ma /= 2;
+    // Calibrate 
+    if (pilot_derate != 0) {
+      // pilot_derate is usally negative percentages (0, -1, -2 .. -CALIB_PILOT_MAX)
+      ma = ma * (100 + pilot_derate ) / 100;
+      // but no less than the minimum.
+      if (ma < 6000) ma = 6000; 
+    }
     if (ma > MAXIMUM_OUTLET_CURRENT) ma = MAXIMUM_OUTLET_CURRENT;
     unsigned int val = MAtoPwm(ma);
     log(LOG_TRACE, P("Pin %d to PWM %d"), pin, val);
@@ -759,10 +807,12 @@ static inline unsigned long ulong_sqrt(unsigned long in) {
   // Removing floating point saves us almost 1K of flash.
   for(out = 1; out*out <= in; out++) ;
   return out - 1;
+//  return (unsigned long)sqrt((float)in);
 }
 
 unsigned long readCurrent(unsigned int car) {
   unsigned int car_pin = (car == CAR_A) ? CAR_A_CURRENT_PIN : CAR_B_CURRENT_PIN;
+  char calib_amm = car == CAR_A ? calib.amm_a : calib.amm_b;
   unsigned long sum = 0;
   unsigned int zero_crossings = 0;
   unsigned long last_zero_crossing_time = 0, now_ms;
@@ -794,7 +844,10 @@ unsigned long readCurrent(unsigned int car) {
     case 3:
       // The answer is the square root of the mean of the squares.
       // But additionally, that value must be scaled to a real current value.
-      return ulong_sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR;
+      sum = ulong_sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR;
+      // Only apply calibration on readings meaningfully high.
+      if ( sum > 5000 ) sum += 100 * calib_amm;
+      return sum;
     }
   }
   // ran out of time. Assume that it's simply not oscillating any. 
@@ -1215,7 +1268,8 @@ void doClockMenu(boolean initialize) {
       if (enable_dst) toSet = dst.toUTC(toSet);
       setTime(toSet);
       RTC.set(toSet);
-      inClockMenu = false;
+      doMenuFunc = doMenu;
+      inMenu = false; // exit all menus
       display.clear();
       return;
     }
@@ -1331,7 +1385,8 @@ void doEventMenu(boolean initialize) {
   }
   if (event == EVENT_LONG_PUSH) {
     if (editCursor == 0 && editEvent == EVENT_COUNT) {
-      inEventMenu = false;
+      doMenuFunc = doMenu;
+      inMenu = false;
       display.clear();
       return;
     }
@@ -1425,6 +1480,87 @@ void doEventMenu(boolean initialize) {
   
 }
 
+///////////////////////////
+// calib_struct support
+void calib_struct::eepromRead() {
+  EEPROMClass().get(EEPROM_CALIB, *this);
+  if (abs(amm_a) > CALIB_AMM_MAX) amm_a = 0;
+  if (abs(amm_b) > CALIB_AMM_MAX) amm_b = 0;
+  if (pilot_a > 0 || pilot_a < -CALIB_PILOT_MAX) pilot_a = 0;
+  if (pilot_b > 0 || pilot_b < -CALIB_PILOT_MAX) pilot_b = 0;
+}
+
+void calib_struct::eepromWrite() {
+  EEPROMClass().put(EEPROM_CALIB, *this);
+}
+
+void doCalibMenu(boolean initialize) { calib.doMenu(initialize); }
+
+void calib_struct::doMenu(boolean initialize) {
+#define MAX_ITEMS 4
+  unsigned int event = checkEvent();
+  char str[17];
+  if (initialize) {
+    display.clear();
+    menuItem = 0;
+    event = EVENT_SHORT_PUSH;
+  } else {
+    
+    char& amm((menuItem & 1) == 0 ? amm_a : amm_b);
+    char& pilot((menuItem & 1) == 0 ? pilot_a : pilot_b);
+    
+    switch (event ) {
+      case EVENT_SHORT_PUSH:
+        switch (menuItem)  {
+          case 0: 
+          case 1: if ( ++amm > CALIB_AMM_MAX) amm = -CALIB_AMM_MAX; break;
+          case 2: 
+          case 3: if ( --pilot < -CALIB_PILOT_MAX) pilot = 0; break;
+        }
+        break;
+      case EVENT_LONG_PUSH:
+        menuItem++;
+        if ( menuItem >= MAX_ITEMS) {
+          eepromWrite();
+          doMenuFunc = ::doMenu;
+          inMenu = false; // exit completely all the way
+          return;
+        }
+        break;
+      default: return;
+    }
+  }
+
+  // drawing
+  char* carSymb = (menuItem & 1) == 0 ? "A" : "B";
+  char& amm((menuItem & 1) == 0 ? amm_a : amm_b);
+  char& pilot((menuItem & 1) == 0 ? pilot_a : pilot_b);
+  
+  switch (menuItem) {
+    case 0:
+    case 1:
+      display.clear();
+      display.print(P("Ammeter"));
+
+      display.setCursor(0, 1);
+      snprintf(str, sizeof(str), P(" Car %s: %s0.%d"), carSymb, amm < 0 ? "-" : "+", abs(amm));
+      display.print(str);
+      break;
+
+    case 2: 
+    case 3:
+      display.clear();
+      display.print(P("Pilot derate"));
+
+      display.setCursor(0, 1);
+      snprintf(str, sizeof(str), P(" Car %s: %d%%"), carSymb, (int)pilot);
+      display.print(str);
+      break;
+  }
+}
+// calibration structure support
+////////////////////////////////////////
+
 void doMenu(boolean initialize) {
   unsigned int max_current_amps;
   unsigned int event = checkEvent();
@@ -1445,7 +1581,6 @@ void doMenu(boolean initialize) {
       case MENU_OPERATING_MODE:
         operatingMode = menu_item;
         EEPROM.write(EEPROM_LOC_MODE, operatingMode);
-//        EEPROM.write(EEPROM_LOC_CAR, 0xff); // undefined
         break;
       case MENU_CURRENT_AVAIL:
         max_current_amps = currentMenuChoices[menu_item];
@@ -1454,8 +1589,7 @@ void doMenu(boolean initialize) {
         break;
       case MENU_CLOCK:
         if (menu_item == 0) {
-          inMenu = false;
-          inClockMenu = true;
+          doMenuFunc = doClockMenu;
           doClockMenu(true);
           return;
         }
@@ -1466,9 +1600,15 @@ void doMenu(boolean initialize) {
         break;
       case MENU_EVENT:
         if (menu_item == 0) {
-          inMenu = false;
-          inEventMenu = true;
+          doMenuFunc = doEventMenu;
           doEventMenu(true);
+          return;
+        }
+        break;
+      case MENU_CALIB: 
+        if (menu_item == 0 ) {
+          doMenuFunc = doCalibMenu;
+          doCalibMenu(true);
           return;
         }
         break;
@@ -1505,6 +1645,10 @@ void doMenu(boolean initialize) {
         menu_item = enable_dst?0:1;
         break;
       case MENU_EVENT:
+        menu_item = 1; // default to "No"
+        menu_item_max = 1;
+        break;
+      case MENU_CALIB:
         menu_item = 1; // default to "No"
         menu_item_max = 1;
         break;
@@ -1578,6 +1722,19 @@ void doMenu(boolean initialize) {
           break;
       }
       break;
+    case MENU_CALIB:
+      display.print(P(MENU_CALIB_HEADER));
+      display.setCursor(0, 1);
+      display.print((menu_item == menu_item_selected) ? '+' : ' ');
+      switch (menu_item) {
+        case 0:
+          display.print(P(OPTION_YES_TEXT));
+          break;
+        case 1:
+          display.print(P(OPTION_NO_TEXT));
+          break;
+      }
+      break;
     case MENU_EXIT:
       display.print(P(MENU_EXIT_HEADER));
       display.setCursor(0, 1);
@@ -1593,6 +1750,7 @@ void doMenu(boolean initialize) {
       break;
   }
 }
+
 
 void setup() {
 
@@ -1751,15 +1909,7 @@ void loop() {
   wdt_reset();
 
   if (inMenu) {
-    doMenu(false);
-    return;
-  }
-  if (inClockMenu) {
-    doClockMenu(false);
-    return;
-  }
-  if (inEventMenu) {
-    doEventMenu(false);
+    doMenuFunc(false);
     return;
   }
   
