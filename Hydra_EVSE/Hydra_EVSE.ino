@@ -20,9 +20,9 @@
 
 #include <avr/wdt.h>
 #include <Wire.h>
+#include <EEPROM.h>
 #include <LiquidTWI2.h>
 #include <PWM.h>
-#include <EEPROM.h>
 #include <Time.h>
 #include <DS1307RTC.h>
 #include <Timezone.h>
