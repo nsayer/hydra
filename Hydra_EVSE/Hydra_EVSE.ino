@@ -20,12 +20,18 @@
 
 #include <avr/wdt.h>
 #include <Wire.h>
-#include <EEPROM.h>
 #include <LiquidTWI2.h>
 #include <PWM.h>
+#include <EEPROM.h>
 #include <Time.h>
 #include <DS1307RTC.h>
 #include <Timezone.h>
+
+// HW version
+#define HW_VERSION "2.3.1"
+// SW version
+#define SW_VERSION "2.4.0"
+
 
 #define LCD_I2C_ADDR 0x20 // for adafruit shield or backpack
 
@@ -148,6 +154,7 @@
 #define BOTH                    0
 #define CAR_A                   1
 #define CAR_B                   2
+#define DEFAULT_TIEBREAK        CAR_A
 
 // Don't use 0 or 1 because that's the value of LOW and HIGH.
 #define HALF                    3
@@ -327,10 +334,31 @@ typedef struct event_struct {
 
 event_type events[EVENT_COUNT];
 
+// Calibration menu items
+#define CALIB_AMM_MAX 5 // this is in 0.1A units
+#define CALIB_PILOT_MAX 10 // this is in -% units. Can derate pilots up to 5%.
+typedef struct calib_struct {
+  char amm_a, amm_b, pilot_a, pilot_b;
+
+  static unsigned char menuItem;
+
+  calib_struct() : amm_a(0), amm_b(0), pilot_a(0), pilot_b(0) {
+    eepromRead();
+  }
+
+  void eepromWrite();
+  void eepromRead();
+  void doMenu(boolean initialize);
+
+} calib_type;
+
+calib_type calib;
+static unsigned char calib_struct::menuItem;
+
+
 // The location in EEPROM to save the operating mode
 #define EEPROM_LOC_MODE 0
-// The location in EEPROM to save the (sequential mode) starting car
-#define EEPROM_LOC_CAR 1
+
 // The location in EEPROM to save the maximum current (in amps)
 #define EEPROM_LOC_MAX_AMPS 2
 // The location in EEPROM of the selected timezone
@@ -340,6 +368,13 @@ event_type events[EVENT_COUNT];
 
 // Where do we start storing the events?
 #define EEPROM_EVENT_BASE 0x10
+
+// where do we store calibration data?
+#define EEPROM_CALIB (EEPROM_EVENT_BASE + EVENT_COUNT * sizeof(event_struct))
+
+// current tail in EEPROM
+#define EEPROM_END (EEPROM_CALIB + sizeof(calib_type))
+
 
 // menu 0: operating mode
 #define MENU_OPERATING_MODE 0
@@ -369,11 +404,17 @@ unsigned char currentMenuChoices[] = { 12, 16, 20, 24, 28, 30, 32, 36, 40, 44, 5
 // menu 4: event alarms
 #define MENU_EVENT 4
 #define MENU_EVENT_HEADER "Config Events?"
-// menu 5: exit
-#define MENU_EXIT 5
+
+//menu 5: calibrations
+#define MENU_CALIB 5
+#define MENU_CALIB_HEADER "Calibration?"
+
+// menu 6: exit
+#define MENU_EXIT 6
 #define MENU_EXIT_HEADER "Exit Menus?"
+
 // end menus
-#define MAX_MENU_NUMBER 5
+#define MAX_MENU_NUMBER MENU_EXIT
 
 #define DAY_FLAGS "SMTWTFS"
 
@@ -412,8 +453,6 @@ Timezone dst(summer, winter);
 char p_buffer[96];
 #define P(str) (strcpy_P(p_buffer, PSTR(str)), p_buffer)
 
-#define VERSION "2.3.1 (EVSE)"
-
 LiquidTWI2 display(LCD_I2C_ADDR, 1);
 
 unsigned long car_a_current_samples[ROLLING_AVERAGE_SIZE], car_b_current_samples[ROLLING_AVERAGE_SIZE];
@@ -425,6 +464,7 @@ unsigned long car_a_error_time, car_b_error_time;
 unsigned long last_current_log_car_a, last_current_log_car_b;
 unsigned long last_state_log;
 unsigned long sequential_pilot_timeout;
+boolean seq_car_a_done = false, seq_car_b_done = false;
 unsigned int pilot_state_a, pilot_state_b;
 unsigned int operatingMode, sequential_mode_tiebreak;
 unsigned long button_press_time, button_debounce_time;
@@ -441,8 +481,13 @@ volatile boolean gfiTriggered = false;
 boolean paused = false;
 boolean enterPause = false;
 boolean inMenu = false;
-boolean inClockMenu = false;
-boolean inEventMenu = false;
+
+// top level do-menu func forward declaration 
+void doMenu(boolean initialize);
+
+// current menu handler
+void (*doMenuFunc)(boolean) = doMenu;
+
 unsigned int menu_number; // which menu are we presently in?
 unsigned int menu_item; // which item within the present menu is the currently displayed option?
 unsigned int menu_item_max; // for the current menu, what's the maximum item number?
@@ -680,14 +725,17 @@ void setPilot(unsigned int car, unsigned int which) {
   log(LOG_DEBUG, P("Setting %s pilot to %s"), car_str(car), logic_str(which));
   // set the outgoing pilot for the given car to either HALF state, FULL state, or HIGH.
   int pin;
+  char pilot_derate;
   switch(car) {
     case CAR_A:
       pin = CAR_A_PILOT_OUT_PIN;
       pilot_state_a = which;
+      pilot_derate = calib.pilot_a;
       break;
     case CAR_B:
       pin = CAR_B_PILOT_OUT_PIN;
       pilot_state_b = which;
+      pilot_derate = calib.pilot_b;
       break;
     default: return;
   }
@@ -699,6 +747,13 @@ void setPilot(unsigned int car, unsigned int which) {
   else {
     unsigned long ma = incomingPilotMilliamps;
     if (which == HALF) ma /= 2;
+    // Calibrate 
+    if (pilot_derate != 0) {
+      // pilot_derate is usally negative percentages (0, -1, -2 .. -CALIB_PILOT_MAX)
+      ma = ma * (100 + pilot_derate ) / 100;
+      // but no less than the minimum.
+      if (ma < 6000) ma = 6000; 
+    }
     if (ma > MAXIMUM_OUTLET_CURRENT) ma = MAXIMUM_OUTLET_CURRENT;
     unsigned int val = MAtoPwm(ma);
     log(LOG_TRACE, P("Pin %d to PWM %d"), pin, val);
@@ -752,10 +807,12 @@ static inline unsigned long ulong_sqrt(unsigned long in) {
   // Removing floating point saves us almost 1K of flash.
   for(out = 1; out*out <= in; out++) ;
   return out - 1;
+//  return (unsigned long)sqrt((float)in);
 }
 
 unsigned long readCurrent(unsigned int car) {
   unsigned int car_pin = (car == CAR_A) ? CAR_A_CURRENT_PIN : CAR_B_CURRENT_PIN;
+  char calib_amm = car == CAR_A ? calib.amm_a : calib.amm_b;
   unsigned long sum = 0;
   unsigned int zero_crossings = 0;
   unsigned long last_zero_crossing_time = 0, now_ms;
@@ -787,7 +844,10 @@ unsigned long readCurrent(unsigned int car) {
     case 3:
       // The answer is the square root of the mean of the squares.
       // But additionally, that value must be scaled to a real current value.
-      return ulong_sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR;
+      sum = ulong_sqrt(sum / sample_count) * CURRENT_SCALE_FACTOR;
+      // Only apply calibration on readings meaningfully high.
+      if ( sum > 5000 ) sum += 100 * calib_amm;
+      return sum;
     }
   }
   // ran out of time. Assume that it's simply not oscillating any. 
@@ -808,10 +868,20 @@ unsigned long rollRollingAverage(unsigned long array[], unsigned long new_value)
 #endif
 }
 
+// So the desired logic is as follows: 
+// (1) If one or none cars are plugged, the behavior is really no different from shared mode. 
+// (2) if two cars are plugged, 
+// (2a) on un-pause the tie is broken with last car charging during last non-pause, or last car plugged during pause.
+// (2b) once cars are done charging, do not keep flipping -- keep their state B-HIGH. This is reset by entering pause, 
+// OR any of the cars unplugged, in which case "done" restrictions are foregone, as flipping becomes non-issue -- the 
+// car will keep itself off even if we are at FULL advertisement.
+
 void sequential_mode_transition(unsigned int us, unsigned int car_state) {
   unsigned int them = (us == CAR_A)?CAR_B:CAR_A;
   unsigned int *last_car_state = (us == CAR_A)?&last_car_a_state:&last_car_b_state;
   unsigned int their_state = (us == CAR_A)?last_car_b_state:last_car_a_state;
+  boolean& us_done = us == CAR_A?seq_car_a_done:seq_car_b_done;
+  boolean& them_done = them == CAR_A? seq_car_a_done:seq_car_b_done;
   
   switch(car_state) {
     case STATE_A:
@@ -824,7 +894,6 @@ void sequential_mode_transition(unsigned int us, unsigned int car_state) {
       if (their_state == STATE_B)
       {
           setPilot(them, FULL);
-          EEPROM.write(EEPROM_LOC_CAR, them);
           display.setCursor((them == CAR_A)?0:8, 1);
           display.print((them == CAR_A)?"A":"B");
           display.print(P(": off  "));
@@ -832,23 +901,30 @@ void sequential_mode_transition(unsigned int us, unsigned int car_state) {
       display.setCursor((us == CAR_A)?0:8, 1);
       display.print((us == CAR_A)?"A":"B");
       display.print(P(": ---  "));
+      // reset done state for all
+      us_done = false;
+      them_done = false;
       break;
     case STATE_B:
       // No matter what, insure that the relay is off.
       setRelay(us, LOW);
       if (*last_car_state == STATE_C || *last_car_state == STATE_D) {
         // We transitioned from C/D to B. That means we're passing the batton
-        // to the other car, if they want it.
+        // to the other car, if they want it and not marked "done" yet.
         if (their_state == STATE_B) {
-          setPilot(them, FULL);
-          setPilot(us, HIGH);
-          EEPROM.write(EEPROM_LOC_CAR, them);
+          if ( ! them_done) { 
+            // flip only if they are not done yet, otherwise wait for pilot timeout before we do again.
+            setPilot(us, HIGH);
+            setPilot(them, FULL);
+          }
           display.setCursor((them == CAR_A)?0:8, 1);
           display.print((them == CAR_A)?"A":"B");
-          display.print(P(": off  "));
+          if (them_done) display.print(P(": done ")); else display.print(P(": off  "));
           display.setCursor((us == CAR_A)?0:8, 1);
           display.print((us == CAR_A)?"A":"B");
           display.print(P(": done ")); // differentiated from "wait" because a C/D->B transition has occurred.
+          // Disable future charges for this car until re-unpaused or re-plugged.
+          us_done = true;
           sequential_pilot_timeout = millis(); // We're both now in B. Start flipping.
         } else {
           display.setCursor((us == CAR_A)?0:8, 1);
@@ -861,8 +937,9 @@ void sequential_mode_transition(unsigned int us, unsigned int car_state) {
         if (their_state == STATE_A) {
           // We can only grab the batton if they're not plugged in at all.
           setPilot(us, FULL);
+          us_done = false;
+          them_done = false;
           sequential_pilot_timeout = 0;
-          EEPROM.write(EEPROM_LOC_CAR, us);
           display.setCursor((us == CAR_A)?0:8, 1);
           display.print((us == CAR_A)?"A":"B");
           display.print(P(": off  "));
@@ -872,15 +949,13 @@ void sequential_mode_transition(unsigned int us, unsigned int car_state) {
           // If it's not us, then we simply ignore this transition entirely. The other car will wind up in this same place,
           // we'll turn their pilot on, and then clear the tiebreak. Next time we roll through, we'll go into the other
           // half of this if/else and we'll get the "wait" display
-          if (sequential_mode_tiebreak != us && sequential_mode_tiebreak != DUNNO) {
+          if (sequential_mode_tiebreak != us ) {
             return;
           }
           // But if it IS us, then clear the tiebreak.
-          if (sequential_mode_tiebreak == us) {
-            sequential_mode_tiebreak = DUNNO;
+          if (!us_done && (sequential_mode_tiebreak == us )) {
             setPilot(us, FULL);
             sequential_pilot_timeout = millis();
-            EEPROM.write(EEPROM_LOC_CAR, us);
             display.setCursor((us == CAR_A)?0:8, 1);
             display.print((us == CAR_A)?"A":"B");
             display.print(P(": off  "));
@@ -890,7 +965,10 @@ void sequential_mode_transition(unsigned int us, unsigned int car_state) {
         // Either they are in state C/D or they're in state B and we lost the tiebreak.
         display.setCursor((us == CAR_A)?0:8, 1);
         display.print((us == CAR_A)?"A":"B");
-        display.print(P(": wait "));
+        if ( us_done) 
+          display.print(P(": done ")); 
+        else 
+          display.print(P(": wait "));
       }
       break;
     case STATE_C:
@@ -1190,7 +1268,8 @@ void doClockMenu(boolean initialize) {
       if (enable_dst) toSet = dst.toUTC(toSet);
       setTime(toSet);
       RTC.set(toSet);
-      inClockMenu = false;
+      doMenuFunc = doMenu;
+      inMenu = false; // exit all menus
       display.clear();
       return;
     }
@@ -1306,7 +1385,8 @@ void doEventMenu(boolean initialize) {
   }
   if (event == EVENT_LONG_PUSH) {
     if (editCursor == 0 && editEvent == EVENT_COUNT) {
-      inEventMenu = false;
+      doMenuFunc = doMenu;
+      inMenu = false;
       display.clear();
       return;
     }
@@ -1400,6 +1480,87 @@ void doEventMenu(boolean initialize) {
   
 }
 
+///////////////////////////
+// calib_struct support
+void calib_struct::eepromRead() {
+  EEPROMClass().get(EEPROM_CALIB, *this);
+  if (abs(amm_a) > CALIB_AMM_MAX) amm_a = 0;
+  if (abs(amm_b) > CALIB_AMM_MAX) amm_b = 0;
+  if (pilot_a > 0 || pilot_a < -CALIB_PILOT_MAX) pilot_a = 0;
+  if (pilot_b > 0 || pilot_b < -CALIB_PILOT_MAX) pilot_b = 0;
+}
+
+void calib_struct::eepromWrite() {
+  EEPROMClass().put(EEPROM_CALIB, *this);
+}
+
+void doCalibMenu(boolean initialize) { calib.doMenu(initialize); }
+
+void calib_struct::doMenu(boolean initialize) {
+#define MAX_ITEMS 4
+  unsigned int event = checkEvent();
+  char str[17];
+  if (initialize) {
+    display.clear();
+    menuItem = 0;
+    event = EVENT_SHORT_PUSH;
+  } else {
+    
+    char& amm((menuItem & 1) == 0 ? amm_a : amm_b);
+    char& pilot((menuItem & 1) == 0 ? pilot_a : pilot_b);
+    
+    switch (event ) {
+      case EVENT_SHORT_PUSH:
+        switch (menuItem)  {
+          case 0: 
+          case 1: if ( ++amm > CALIB_AMM_MAX) amm = -CALIB_AMM_MAX; break;
+          case 2: 
+          case 3: if ( --pilot < -CALIB_PILOT_MAX) pilot = 0; break;
+        }
+        break;
+      case EVENT_LONG_PUSH:
+        menuItem++;
+        if ( menuItem >= MAX_ITEMS) {
+          eepromWrite();
+          doMenuFunc = ::doMenu;
+          inMenu = false; // exit completely all the way
+          return;
+        }
+        break;
+      default: return;
+    }
+  }
+
+  // drawing
+  char* carSymb = (menuItem & 1) == 0 ? "A" : "B";
+  char& amm((menuItem & 1) == 0 ? amm_a : amm_b);
+  char& pilot((menuItem & 1) == 0 ? pilot_a : pilot_b);
+  
+  switch (menuItem) {
+    case 0:
+    case 1:
+      display.clear();
+      display.print(P("Ammeter"));
+
+      display.setCursor(0, 1);
+      snprintf(str, sizeof(str), P(" Car %s: %s0.%d"), carSymb, amm < 0 ? "-" : "+", abs(amm));
+      display.print(str);
+      break;
+
+    case 2: 
+    case 3:
+      display.clear();
+      display.print(P("Pilot derate"));
+
+      display.setCursor(0, 1);
+      snprintf(str, sizeof(str), P(" Car %s: %d%%"), carSymb, (int)pilot);
+      display.print(str);
+      break;
+  }
+}
+// calibration structure support
+////////////////////////////////////////
+
 void doMenu(boolean initialize) {
   unsigned int max_current_amps;
   unsigned int event = checkEvent();
@@ -1420,7 +1581,6 @@ void doMenu(boolean initialize) {
       case MENU_OPERATING_MODE:
         operatingMode = menu_item;
         EEPROM.write(EEPROM_LOC_MODE, operatingMode);
-        EEPROM.write(EEPROM_LOC_CAR, 0xff); // undefined
         break;
       case MENU_CURRENT_AVAIL:
         max_current_amps = currentMenuChoices[menu_item];
@@ -1429,8 +1589,7 @@ void doMenu(boolean initialize) {
         break;
       case MENU_CLOCK:
         if (menu_item == 0) {
-          inMenu = false;
-          inClockMenu = true;
+          doMenuFunc = doClockMenu;
           doClockMenu(true);
           return;
         }
@@ -1441,9 +1600,15 @@ void doMenu(boolean initialize) {
         break;
       case MENU_EVENT:
         if (menu_item == 0) {
-          inMenu = false;
-          inEventMenu = true;
+          doMenuFunc = doEventMenu;
           doEventMenu(true);
+          return;
+        }
+        break;
+      case MENU_CALIB: 
+        if (menu_item == 0 ) {
+          doMenuFunc = doCalibMenu;
+          doCalibMenu(true);
           return;
         }
         break;
@@ -1480,6 +1645,10 @@ void doMenu(boolean initialize) {
         menu_item = enable_dst?0:1;
         break;
       case MENU_EVENT:
+        menu_item = 1; // default to "No"
+        menu_item_max = 1;
+        break;
+      case MENU_CALIB:
         menu_item = 1; // default to "No"
         menu_item_max = 1;
         break;
@@ -1553,6 +1722,19 @@ void doMenu(boolean initialize) {
           break;
       }
       break;
+    case MENU_CALIB:
+      display.print(P(MENU_CALIB_HEADER));
+      display.setCursor(0, 1);
+      display.print((menu_item == menu_item_selected) ? '+' : ' ');
+      switch (menu_item) {
+        case 0:
+          display.print(P(OPTION_YES_TEXT));
+          break;
+        case 1:
+          display.print(P(OPTION_NO_TEXT));
+          break;
+      }
+      break;
     case MENU_EXIT:
       display.print(P(MENU_EXIT_HEADER));
       display.setCursor(0, 1);
@@ -1569,6 +1751,7 @@ void doMenu(boolean initialize) {
   }
 }
 
+
 void setup() {
 
   MCUSR = 0; // changing the watchdog requires this first.
@@ -1579,7 +1762,7 @@ void setup() {
   Serial.begin(SERIAL_BAUD_RATE);
 #endif
 
-  log(LOG_DEBUG, P("Starting v%s"), VERSION);
+  log(LOG_DEBUG, P("Starting HW:%s SW:%s"), HW_VERSION, SW_VERSION);
   
   InitTimersSafe();
   
@@ -1588,9 +1771,12 @@ void setup() {
   display.setBacklight(WHITE);
   display.clear();
   display.setCursor(0, 0);
-  display.print(P("J1772 Hydra"));
+  display.print(P("J1772 Hydra "));
   display.setCursor(0, 1);
-  display.print(P(VERSION));
+  display.print(P("HW:"));
+  display.print(P(HW_VERSION));
+  display.print(P("SW:"));
+  display.print(P(SW_VERSION));
 
   pinMode(GFI_PIN, INPUT);
   pinMode(GFI_TEST_PIN, OUTPUT);
@@ -1639,11 +1825,8 @@ void setup() {
     operatingMode = DEFAULT_MODE;
     EEPROM.write(EEPROM_LOC_MODE, operatingMode);
   }
-  if (operatingMode == MODE_SEQUENTIAL) {
-    sequential_mode_tiebreak = EEPROM.read(EEPROM_LOC_CAR);
-    if (sequential_mode_tiebreak != CAR_A && sequential_mode_tiebreak != CAR_B)
-      sequential_mode_tiebreak = DUNNO;
-  }
+  sequential_mode_tiebreak = DEFAULT_TIEBREAK;
+  
   unsigned int max_current_amps = EEPROM.read(EEPROM_LOC_MAX_AMPS);
   // Make sure that the saved value is one of the choices in the menu
   boolean found = false;
@@ -1726,15 +1909,7 @@ void loop() {
   wdt_reset();
 
   if (inMenu) {
-    doMenu(false);
-    return;
-  }
-  if (inClockMenu) {
-    doClockMenu(false);
-    return;
-  }
-  if (inEventMenu) {
-    doEventMenu(false);
+    doMenuFunc(false);
     return;
   }
   
@@ -1810,7 +1985,7 @@ void loop() {
         // remember which car was active
         if (pilot_state_a == FULL) sequential_mode_tiebreak = CAR_A;
         else if (pilot_state_b == FULL) sequential_mode_tiebreak = CAR_B;
-        else sequential_mode_tiebreak = DUNNO;
+        else sequential_mode_tiebreak = DEFAULT_TIEBREAK;
       }
       // Turn off both pilots
       setPilot(CAR_A, HIGH);
@@ -1821,11 +1996,18 @@ void loop() {
       last_car_a_state = DUNNO;
       last_car_b_state = DUNNO;
       car_a_request_time = 0;
-      car_b_request_time = 0;      
+      car_b_request_time = 0;     
+      seq_car_a_done = false;
+      seq_car_b_done = false; 
       log(LOG_INFO, P("Pausing."));
     }
     paused = true;
   } else {
+    // reset car states if unpaused so that initial transitions may run on unpause for any plugged cars.
+    if ( paused ) {
+      last_car_a_state = DUNNO;
+      last_car_b_state = DUNNO;
+    }
     paused = false;
   }
 
@@ -1875,6 +2057,7 @@ void loop() {
         // We're paused. We will fix up the display ourselves.
         display.setCursor(0, 1);
         display.print(P("A: ---  "));
+        last_car_a_state = car_a_state;
       }
       // fall through...
     case STATE_B:
@@ -1887,8 +2070,16 @@ void loop() {
           setPilot(CAR_B, FULL);
       }
       if (paused && car_a_state == STATE_B) {
+        // just plugged in -- set the tie break in sequential mode to this last plugged car during pause.
+        if ( last_car_a_state == STATE_A ) {
+          sequential_mode_tiebreak = CAR_A;
+          last_car_a_state = STATE_B;
+        }
         display.setCursor(0, 1);
-        display.print(P("A: off  "));
+        if ( operatingMode == MODE_SEQUENTIAL && sequential_mode_tiebreak == CAR_A) 
+          display.print(P("A: off* "));
+        else 
+          display.print(P("A: off  "));
       }
       break;
     }
@@ -1921,6 +2112,7 @@ void loop() {
         // We're paused. We will fix up the display ourselves.
         display.setCursor(8, 1);
         display.print(P("B: ---  "));
+        last_car_b_state = car_b_state;
       }
       // fall through...
     case STATE_B:
@@ -1933,8 +2125,21 @@ void loop() {
           setPilot(CAR_A, FULL);
       }
       if (paused && car_b_state == STATE_B) {
+        // just plugged in -- set the tie break in sequential mode to this last plugged car during pause.
+        // this will not engage if the state ws "DUNNO" which i guess what it is going to be after just
+        // entering pause or powering up. But i cannot use from DUNNO transition here since it may also be 
+        // just entering the pause, in which case it will always reset the tiebreak to B no matter what.
+        // So resetting priority would require unplug-plug and not just pause-then-plug. It should be ok
+        // though.
+        if ( last_car_b_state == STATE_A ) {
+          sequential_mode_tiebreak = CAR_B;
+          last_car_b_state = STATE_B;
+        }
         display.setCursor(8, 1);
-        display.print(P("B: off  "));
+        if ( operatingMode == MODE_SEQUENTIAL && sequential_mode_tiebreak == CAR_B) 
+          display.print(P("B: off* "));
+        else 
+          display.print(P("B: off  "));
       }
       break;
     }
@@ -1959,14 +2164,22 @@ void loop() {
         setPilot(CAR_B, FULL);
         sequential_pilot_timeout = now;
         display.setCursor(0, 1);
-        display.print(P("A: wait B: off  "));
+        if ( seq_car_a_done ) 
+          display.print(P("A: done "));
+        else 
+          display.print(P("A: wait "));
+        display.print(P("B: off  "));
       } else if (pilot_state_b == FULL) {
         log(LOG_INFO, P("Sequential mode offer timeout, moving offer to %s"), car_str(CAR_A));
         setPilot(CAR_B, HIGH);
         setPilot(CAR_A, FULL);
         sequential_pilot_timeout = now;
         display.setCursor(0, 1);
-        display.print(P("A: off  B: wait "));
+        display.print(P("A: off  "));
+        if ( seq_car_b_done ) 
+          display.print(P("B: done "));
+        else 
+          display.print(P("B: wait "));
       }
     }
   }
