@@ -186,7 +186,13 @@ void persisted_struct::reset()
 
   // Weekends: start at 7pm and pause (any day) on 3pm
   events[2].dow_mask = ~weekdays; events[2].hour = 19;
-  events[3].dow_mask = -1u; events[3].hour = 15;
+  events[3].dow_mask = ~weekdays; events[3].hour = 15;
+
+  // On weekdays, we some times turn on during partial peek.  The full peak on weekdays starts at 2pm, 
+  // so we add a fifth event that switches the station off again at 2pm on weekdays in case we turned
+  // it on during partial peak.
+
+  events[4].dow_mask = weekdays; events[4].hour = 14;
 
   calib.reset();
   rtc.reset();

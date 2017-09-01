@@ -1,3 +1,9 @@
+Hydra EVSE version 2.4.2
+========================
+
+* Added the fifth event. If we turn the EVSE manually during partial peak times in PGE, fifth event is needed/
+  configured to switch the station off again at partial peak to full peak transition.
+
 Hydra EVSE version 2.4.1
 ========================
 
