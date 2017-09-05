@@ -411,10 +411,13 @@ struct car_struct {
   void loopCurrentMonitor();
   void loopCheckDelayedTransition();
   void loopSeqHandover(unsigned long nowMs);
+  void raiseError(unsigned long nowMs);
+  
   // Inlines
   char carLetter() {
     return 'A' + car - CAR_A;
   }
+  
   // Returns 0 for car A and 8 for car B. Typically, to print display status or current.
   unsigned int dispCol() {
     return 8 * ( car - CAR_A );
