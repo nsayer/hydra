@@ -6,6 +6,8 @@ Hydra EVSE version 2.4.2
 
 * Bug fix: incorrect error F (CGM) registration on car A (sends to car B instead)
 
+* Bug fix: constant overflow for ERR G restart timeout causing restart not to work for timeouts > ~1 min
+
 Hydra EVSE version 2.4.1
 ========================
 

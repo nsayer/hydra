@@ -155,7 +155,7 @@
 
 //After each GFCI event we will retry charging up to 4 times after a 15 minute
 // delay per event. (UL 2231). This MUST BE bigger than ERROR_DELAY (power on high pilot withdrawal),
-#define GFI_CLEAR_MS (15 * 60 * 1000)
+#define GFI_CLEAR_MS (15ul * 60 * 1000)
 
 #define GFI_CLEAR_ATTEMPTS 4
 
