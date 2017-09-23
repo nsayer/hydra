@@ -36,7 +36,7 @@
 #include "dst.h"
 
 // SW version
-#define SW_VERSION "2.4.1"
+#define SW_VERSION "2.4.2"
 
 // Define this for the basic unit tests run in a generica arduino uno board with a display shield.
 // #define UNIT_TESTS
@@ -155,7 +155,7 @@
 
 //After each GFCI event we will retry charging up to 4 times after a 15 minute
 // delay per event. (UL 2231). This MUST BE bigger than ERROR_DELAY (power on high pilot withdrawal),
-#define GFI_CLEAR_MS (15 * 60 * 1000)
+#define GFI_CLEAR_MS (15ul * 60 * 1000)
 
 #define GFI_CLEAR_ATTEMPTS 4
 
@@ -411,10 +411,13 @@ struct car_struct {
   void loopCurrentMonitor();
   void loopCheckDelayedTransition();
   void loopSeqHandover(unsigned long nowMs);
+  void raiseError(unsigned long nowMs);
+  
   // Inlines
   char carLetter() {
     return 'A' + car - CAR_A;
   }
+  
   // Returns 0 for car A and 8 for car B. Typically, to print display status or current.
   unsigned int dispCol() {
     return 8 * ( car - CAR_A );
@@ -422,7 +425,7 @@ struct car_struct {
 
 };
 
-#define EVENT_COUNT 4
+#define EVENT_COUNT 5
 
 typedef struct event_struct {
   unsigned char hour;
@@ -486,8 +489,8 @@ typedef struct calib_struct {
 // All the data that goes to be read/saved to eprom
 
 // eprom persistence format signature (usually minimally compatible SW_VERSION):
-// 2.4.1
-#define PERSIST_SIG 2411
+// 2.4.2-dev
+#define PERSIST_SIG 2421
 
 // debug to reset eprom
 //#define PERSIST_SIG -1

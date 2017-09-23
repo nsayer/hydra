@@ -1,3 +1,13 @@
+Hydra EVSE version 2.4.2
+========================
+
+* Added the fifth event. If we turn the EVSE manually during partial peak times in PGE, fifth event is needed/
+  configured to switch the station off again at partial peak to full peak transition.
+
+* Bug fix: incorrect error F (CGM) registration on car A (sends to car B instead)
+
+* Bug fix: constant overflow for ERR G restart timeout causing restart not to work for timeouts > ~1 min
+
 Hydra EVSE version 2.4.1
 ========================
 

@@ -180,13 +180,23 @@ void persisted_struct::reset()
   // (so on weekdays, if unpaused manually for partial peak, will pause again for full peak).
   unsigned char weekdays = -1u >> (sizeof(int) << 3) - 5  << 1;
 
+#if EVENT_COUNT >= 4
   // Pause any day at 7am and resume at 11pm on weekdays.
   events[0].dow_mask =  events[1].dow_mask = weekdays;
   events[0].hour = 23; events[1].hour = 7;
 
   // Weekends: start at 7pm and pause (any day) on 3pm
   events[2].dow_mask = ~weekdays; events[2].hour = 19;
-  events[3].dow_mask = -1u; events[3].hour = 15;
+  events[3].dow_mask = ~weekdays; events[3].hour = 15;
+#endif  
+
+  // On weekdays, we some times turn on during partial peek.  The full peak on weekdays starts at 2pm, 
+  // so we add a fifth event that switches the station off again at 2pm on weekdays in case we turned
+  // it on during partial peak.
+
+#if EVENT_COUNT >= 5
+  events[4].dow_mask = weekdays; events[4].hour = 14;
+#endif  
 
   calib.reset();
   rtc.reset();
@@ -428,6 +438,16 @@ void displayStatus(unsigned int status)
 
 }
 
+void car_struct::raiseError(unsigned long nowMs) {
+  setPilot(HIGH);
+  if (last_state != STATE_E) {
+    last_state = STATE_E;
+    error_time =  nowMs;
+  }
+  // Cancel any transitions
+  request_time = 0;
+}
+
 void error(unsigned int status)
 {
   unsigned long now = millis(); // so both cars get the same time.
@@ -447,26 +467,18 @@ void error(unsigned int status)
     timeouts.gfi_time = now;
   }
 
-  if ( car == BOTH || car == CAR_A)
-  {
-    car_a.setPilot(HIGH);
-    if (car_a.last_state != STATE_E)
-    {
-      car_a.last_state = STATE_E;
-      car_a.error_time = now;
-    }
-    car_a.request_time = 0;
-  }
-  if (car == BOTH || car == CAR_B)
-  {
-    car_b.setPilot(HIGH);
-    if (car_b.last_state != STATE_E)
-    {
-      car_b.last_state = STATE_E;
-      car_b.error_time = now;
-    }
-    car_b.request_time = 0;
-  }
+  if ( car == BOTH || car == CAR_A) car_a.raiseError(now);
+  if ( car == BOTH || car == CAR_B) car_b.raiseError(now);
+  
+//  {
+//    car_a.setPilot(HIGH);
+//    if (car_a.last_state != STATE_E)
+//    {
+//      car_a.last_state = STATE_E;
+//      car_a.error_time = now;
+//    }
+//    car_a.request_time = 0;
+//  }
 
   displayStatus(status);
   logInfo(P("Error %c on %s"), errLetter(status), car_str(car));
@@ -2008,7 +2020,7 @@ void loop()
     if ((digitalRead(CAR_A_RELAY_TEST) == LOW) && (car_a.relay_state == HIGH))
     {
       logInfo(P("Ground failure detected on car A"));
-      error(CAR_B | STATUS_ERR | STATUS_ERR_F);
+      error(CAR_A | STATUS_ERR | STATUS_ERR_F);
     }
     if ((digitalRead(CAR_B_RELAY_TEST) == LOW) && (car_b.relay_state == HIGH))
     {
