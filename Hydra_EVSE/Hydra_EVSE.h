@@ -36,7 +36,7 @@
 #include "dst.h"
 
 // SW version
-#define SW_VERSION "2.4.2-dev"
+#define SW_VERSION "2.4.2"
 
 // Define this for the basic unit tests run in a generica arduino uno board with a display shield.
 // #define UNIT_TESTS
