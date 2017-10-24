@@ -1,3 +1,8 @@
+Hydra EVSE version 2.4.3
+========================
+
+* Bug fix: GFI fault count limit does not during pause mode
+
 Hydra EVSE version 2.4.2
 ========================
 

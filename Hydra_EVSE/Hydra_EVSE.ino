@@ -2062,6 +2062,7 @@ void loop()
     {
       // cancel all events except for relay check guarding period
       timeouts.clear();
+      gfi_count = 0;
 
       if (operatingMode == MODE_SEQUENTIAL)
       {
