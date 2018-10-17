@@ -2,6 +2,7 @@ Hydra EVSE version 2.4.3
 ========================
 
 * Bug fix: GFI fault count limit does not during pause mode
+* GFI_TEST_DEBOUNCE_TIME 250 (down from 400ms)
 
 Hydra EVSE version 2.4.2
 ========================
