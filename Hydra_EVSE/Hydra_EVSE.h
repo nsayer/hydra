@@ -36,7 +36,8 @@
 #include "dst.h"
 
 // SW version
-#define SW_VERSION "2.4.2"
+// #define SW_VERSION "2.4.3-dev"
+#define SW_VERSION "2.4.3"
 
 // Define this for the basic unit tests run in a generica arduino uno board with a display shield.
 // #define UNIT_TESTS
@@ -151,7 +152,7 @@
 #define GFI_TEST_CYCLES 50 // 50 cycles
 #define GFI_PULSE_DURATION_MS 8000 // of roughly 60 Hz. - 8 ms as a half-cycle
 #define GFI_TEST_CLEAR_TIME 100 // Takes the GFCI this long to clear
-#define GFI_TEST_DEBOUNCE_TIME 400 // Delay extra time after GFCI clears to make sure it stays.
+#define GFI_TEST_DEBOUNCE_TIME 250 // Delay extra time after GFCI clears to make sure it stays.
 
 //After each GFCI event we will retry charging up to 4 times after a 15 minute
 // delay per event. (UL 2231). This MUST BE bigger than ERROR_DELAY (power on high pilot withdrawal),
